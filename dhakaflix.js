@@ -159,12 +159,26 @@ function buildSearchQueries(title) {
     return Array.from(queries);
 }
 
+function extractSequelTokens(title) {
+    const tokens = [];
+    const numMatches = (title || "").match(/\b\d+\b/g);
+    if (numMatches) tokens.push(...numMatches);
+    const romanMatches = (title || "").match(/\b(?:ii|iii|iv|v|vi|vii|viii|ix|x)\b/gi);
+    if (romanMatches) tokens.push(...romanMatches.map(r => r.toLowerCase()));
+    return tokens.sort().join(",");
+}
+
 function matchesMovieTitle(itemHref, targetTitle) {
     const folderTitle = extractFolderTitle(itemHref);
     const cleanedTarget = cleanTitle(targetTitle).toLowerCase();
     if (!folderTitle || !cleanedTarget) return false;
     if (folderTitle === cleanedTarget) return true;
     if (stripArticles(folderTitle) === stripArticles(cleanedTarget)) return true;
+
+    // Check sequel/number tokens (e.g. Steins;Gate vs Steins;Gate 0)
+    const tTokens = extractSequelTokens(cleanedTarget);
+    const fTokens = extractSequelTokens(folderTitle);
+    if (tTokens !== fTokens) return false;
 
     const fWords = folderTitle.split(/\s+/).filter(Boolean);
     const tWords = cleanedTarget.split(/\s+/).filter(Boolean);
@@ -190,7 +204,7 @@ function extractTvFolderInfo(path) {
         const match = p.match(/^([^(]+?)\s*\((?:(?:TV\s*)?(?:Series|Cartoon|Mini\s*Series)\s*)?(\d{4})(?:[–\-](\d{4})?)?/i);
         if (match) {
             const rawTitle = match[1].trim();
-            const baseTitle = rawTitle.split(/[:\-\—]/)[0].trim();
+            const baseTitle = rawTitle.split(/\s*[:—]\s*|\s+-\s+/)[0].trim();
             return {
                 title: cleanTitle(rawTitle).toLowerCase(),
                 baseTitle: cleanTitle(baseTitle).toLowerCase(),
@@ -208,6 +222,12 @@ function matchesTvFolder(path, targetTitle, targetYear, serverId) {
         return matchesMovieTitle(path, targetTitle);
     }
     const cleanedTarget = cleanTitle(targetTitle).toLowerCase();
+
+    // Sequel tokens must match (e.g. Steins;Gate vs Steins;Gate 0)
+    const tTokens = extractSequelTokens(cleanedTarget);
+    const fTokens = extractSequelTokens(info.title);
+    if (tTokens !== fTokens) return false;
+
     const titleOk = (info.title === cleanedTarget) ||
                     (info.baseTitle === cleanedTarget) ||
                     (stripArticles(info.title) === stripArticles(cleanedTarget)) ||
@@ -215,7 +235,9 @@ function matchesTvFolder(path, targetTitle, targetYear, serverId) {
                     matchesMovieTitle(path, targetTitle);
     if (!titleOk) return false;
 
-    if (serverId === "df10") {
+    // Special case for Bleach TYBW folder when queried under classic Bleach S2
+    const isTybw = /thousand|tybw/i.test(path);
+    if (serverId === "df10" && isTybw) {
         return true;
     }
 
@@ -279,6 +301,11 @@ function passesEpisodeFilter(pathOrFilename, season, episode, allowAbsolute, tar
         if (pathSeason !== null && pathSeason !== season) {
             return false;
         }
+    }
+
+    // Reject specials and OVAs when requesting regular seasons (season > 0)
+    if (season > 0 && /(?:^|[^a-zA-Z0-9])(?:special|specials|ova|oad|sp)(?:[^a-zA-Z0-9]|$)/i.test(filename)) {
+        return false;
     }
 
     const s = String(season).padStart(2, "0");
