@@ -127,32 +127,43 @@ function buildSearchQueries(title) {
     if (!raw) return [];
 
     const queries = new Set();
-    const words = raw.replace(/[^a-zA-Z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
 
-    // 1. Regex query matching words with any separator (e.g. "Spider.*Man.*Brand.*New.*Day")
+    // Normalized title without apostrophe-s (e.g. "JoJo's" -> "JoJo")
+    const deApos = raw.replace(/['\u2019]s\b/gi, "");
+    const words = deApos.replace(/[^a-zA-Z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
+
+    // 1. Regex query matching words
     if (words.length > 0) {
-        queries.add(words.join(".*"));
+        if (words.every(w => w.length <= 2)) {
+            queries.add(`\\b${words.join("[-_ .]+")}\\b`);
+        } else {
+            queries.add(words.join(".*"));
+        }
     }
 
-    // 2. If title has a colon, dash or hyphen, also add base title and subtitle part
-    const subParts = raw.split(/[:\-\—]/).map(s => s.trim()).filter(Boolean);
+    // 2. Hyphenated compound words preserved (e.g. "K-On", "Spider-Man", "X-Men")
+    const hyphens = raw.match(/\b[a-zA-Z0-9]+-[a-zA-Z0-9]+\b/g);
+    if (hyphens) {
+        hyphens.forEach(h => queries.add(h));
+    }
+
+    // 3. Subtitle splitting on colon, em-dash, or spaced hyphen (" - ")
+    const subParts = raw.split(/\s*[:\u2014]\s*|\s+-\s+/).map(s => s.trim()).filter(Boolean);
     if (subParts.length > 1) {
-        // Base / main title before colon/dash (e.g. "Code Geass" from "Code Geass: Lelouch of the Rebellion")
-        const main = subParts[0];
+        const main = subParts[0].replace(/['\u2019]s\b/gi, "");
         const mainWords = main.replace(/[^a-zA-Z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
         if (mainWords.length > 0) {
             queries.add(mainWords.join(".*"));
         }
-        // Subtitle part (e.g. "Brand New Day")
-        const sub = subParts[subParts.length - 1];
+        const sub = subParts[subParts.length - 1].replace(/['\u2019]s\b/gi, "");
         const subWords = sub.replace(/[^a-zA-Z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
         if (subWords.length > 0) {
             queries.add(subWords.join(".*"));
         }
     }
 
-    // 3. Without articles ("The", "A", "An")
-    const withoutArticle = raw.replace(/^(?:the|a|an)\s+/i, "").trim();
+    // 4. Without articles ("The", "A", "An")
+    const withoutArticle = raw.replace(/^(?:the|a|an)\s+/i, "").trim().replace(/['\u2019]s\b/gi, "");
     if (withoutArticle && withoutArticle !== raw) {
         const noArtWords = withoutArticle.replace(/[^a-zA-Z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
         if (noArtWords.length > 0) {
@@ -160,7 +171,7 @@ function buildSearchQueries(title) {
         }
     }
 
-    // 4. Clean literal string as fallback
+    // 5. Clean literal string as fallback
     if (words.length > 0) {
         queries.add(words.join(" "));
     }
@@ -194,8 +205,10 @@ function matchesMovieTitle(itemHref, targetTitle) {
 
     const fWords = folderTitle.split(/\s+/).filter(Boolean);
     const tWords = cleanedTarget.split(/\s+/).filter(Boolean);
-    if (tWords.length > 1 && tWords.every(w => folderTitle.includes(w))) return true;
-    if (fWords.length > 1 && fWords.every(w => cleanedTarget.includes(w))) return true;
+    const fWordSet = new Set(fWords);
+    const tWordSet = new Set(tWords);
+    if (tWords.length > 1 && tWords.every(w => fWordSet.has(w))) return true;
+    if (fWords.length > 1 && fWords.every(w => tWordSet.has(w))) return true;
 
     return false;
 }
@@ -477,6 +490,9 @@ async function searchTvEpisodes(server, query, season, episode, targetTitle, yea
 
     for (const item of rootMatches) {
         const decodedHref = decodeURIComponent(item.href);
+        const lowerHref = decodedHref.toLowerCase();
+        if (lowerHref.includes("/tutorial/") || lowerHref.includes("/documentary/") || lowerHref.includes("/wwe & aew") || lowerHref.includes("/awards & tv shows/")) continue;
+
         const isVideo = /\.(mkv|mp4|avi)$/i.test(decodedHref);
 
         if (isVideo) {
