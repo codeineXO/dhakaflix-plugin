@@ -26,15 +26,14 @@ A high-speed scraper plugin for Nuvio to stream Movies, TV Series, Anime, and Ca
 
 ## How to Install in Nuvio
 
-### Method 1: GitHub / Git Host (Recommended for Sharing)
-1. Fork or push this repository to your GitHub/Codeberg account.
-2. Copy the **Raw** URL to `manifest.json`:
+### Method 1: GitHub (Recommended)
+1. Copy the **Raw** URL to `manifest.json`:
    ```
-   https://raw.githubusercontent.com/<username>/dhakaflix-plugin/main/manifest.json
+   https://raw.githubusercontent.com/codeineXO/dhakaflix-plugin/main/manifest.json
    ```
-3. Open Nuvio $\rightarrow$ **Settings** $\rightarrow$ **Plugins** $\rightarrow$ **Add Repository**.
-4. Paste the URL and click **Add**.
-5. Click **Refresh** anytime to receive updates pushed to `main`.
+2. Open Nuvio $\rightarrow$ **Settings** $\rightarrow$ **Plugins** $\rightarrow$ **Add Repository**.
+3. Paste the URL and click **Add**.
+4. Click **Refresh** anytime to receive updates pushed to `main`.
 
 ### Method 2: Local Network / Dev Server
 1. Serve the plugin directory over HTTP:
