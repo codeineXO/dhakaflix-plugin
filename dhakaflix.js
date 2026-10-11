@@ -95,6 +95,8 @@ function getSortTag(rank) {
 
 function cleanTitle(str) {
     return (str || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
         .replace(/&/g, "and")
         .replace(/[^a-zA-Z0-9 ]/g, " ")
         .replace(/\s+/g, " ")
@@ -111,7 +113,7 @@ function extractFolderTitle(path) {
     const parts = decodeURIComponent(path).split("/").filter(Boolean);
     for (let i = parts.length - 1; i >= 0; i--) {
         const p = parts[i];
-        const match = p.match(/^([^(]+?)\s*(?:\(\d{4}\)|\d{4}\b)/);
+        const match = p.match(/^([^(]+?)\s*(?:\((?:(?:TV\s*)?(?:Series|Cartoon|Mini\s*Series)\s*)?\d{4}|\(\d{4}\)|\d{4}\b)/i);
         if (match) {
             return cleanTitle(match[1]).toLowerCase();
         }
@@ -132,9 +134,16 @@ function buildSearchQueries(title) {
         queries.add(words.join(".*"));
     }
 
-    // 2. If title has a colon, dash or hyphen, also add the subtitle part (e.g. "Brand New Day")
+    // 2. If title has a colon, dash or hyphen, also add base title and subtitle part
     const subParts = raw.split(/[:\-\—]/).map(s => s.trim()).filter(Boolean);
     if (subParts.length > 1) {
+        // Base / main title before colon/dash (e.g. "Code Geass" from "Code Geass: Lelouch of the Rebellion")
+        const main = subParts[0];
+        const mainWords = main.replace(/[^a-zA-Z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
+        if (mainWords.length > 0) {
+            queries.add(mainWords.join(".*"));
+        }
+        // Subtitle part (e.g. "Brand New Day")
         const sub = subParts[subParts.length - 1];
         const subWords = sub.replace(/[^a-zA-Z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
         if (subWords.length > 0) {
@@ -160,10 +169,13 @@ function buildSearchQueries(title) {
 }
 
 function extractSequelTokens(title) {
+    let s = (title || "").replace(/\b(?:19\d{2}|20[0-2]\d)\b/g, " ");
+    s = s.replace(/\b(?:2160p|1080p|720p|480p|576p|360p|4k|2k|uhd|fhd|hd)\b/gi, " ");
+    s = s.replace(/\b(?:10bit|8bit|12bit|10-bit|8-bit)\b/gi, " ");
     const tokens = [];
-    const numMatches = (title || "").match(/\b\d+\b/g);
+    const numMatches = s.match(/\b\d+\b/g);
     if (numMatches) tokens.push(...numMatches);
-    const romanMatches = (title || "").match(/\b(?:ii|iii|iv|v|vi|vii|viii|ix|x)\b/gi);
+    const romanMatches = s.match(/\b(?:ii|iii|iv|v|vi|vii|viii|ix|x)\b/gi);
     if (romanMatches) tokens.push(...romanMatches.map(r => r.toLowerCase()));
     return tokens.sort().join(",");
 }
@@ -222,16 +234,25 @@ function matchesTvFolder(path, targetTitle, targetYear, serverId) {
         return matchesMovieTitle(path, targetTitle);
     }
     const cleanedTarget = cleanTitle(targetTitle).toLowerCase();
+    const targetBase = cleanTitle(targetTitle.split(/\s*[:—]\s*|\s+-\s+/)[0]).toLowerCase();
 
     // Sequel tokens must match (e.g. Steins;Gate vs Steins;Gate 0)
     const tTokens = extractSequelTokens(cleanedTarget);
     const fTokens = extractSequelTokens(info.title);
     if (tTokens !== fTokens) return false;
 
+    // Check if years align when matching target base title (e.g. Code Geass vs Code Geass: Lelouch of the Rebellion)
+    const yearsAlign = targetYear && info.startYear ?
+        Math.abs(parseInt(targetYear, 10) - parseInt(info.startYear, 10)) <= 1 : false;
+
     const titleOk = (info.title === cleanedTarget) ||
                     (info.baseTitle === cleanedTarget) ||
+                    (info.title === targetBase && yearsAlign) ||
+                    (info.baseTitle === targetBase && yearsAlign) ||
                     (stripArticles(info.title) === stripArticles(cleanedTarget)) ||
                     (stripArticles(info.baseTitle) === stripArticles(cleanedTarget)) ||
+                    (stripArticles(info.title) === stripArticles(targetBase) && yearsAlign) ||
+                    (stripArticles(info.baseTitle) === stripArticles(targetBase) && yearsAlign) ||
                     matchesMovieTitle(path, targetTitle);
     if (!titleOk) return false;
 
