@@ -376,51 +376,58 @@ async function searchTvEpisodes(server, query, season, episode, targetTitle, yea
     const sPad = String(season).padStart(2, "0");
     const epPad = String(episode);
     const isAnimeServer = (server.id === "df10");
+    const isTybw = isAnimeServer && (season === 2 || season === 17 || /thousand|tybw/i.test(targetTitle));
 
     const subSearches = foldersToRecurse.map(async (folderHref) => {
-        const isSequelOrTybw = /thousand|tybw/i.test(folderHref);
-        if (isAnimeServer && season === 1 && isSequelOrTybw) return [];
+        const isTybwFolder = /thousand|tybw/i.test(folderHref);
 
-        const epPattern = `S${sPad}E0*${epPad}(?![0-9])`;
-        const nestedMatches = await h5aiSearch(server, epPattern, folderHref);
-        const epMatches = nestedMatches.filter(item => {
-            const path = decodeURIComponent(item.href);
-            return /\.(mkv|mp4|avi)$/i.test(path) &&
-                passesEpisodeFilter(path.split("/").pop(), season, episode, false) &&
-                !path.toLowerCase().includes("/specials/");
-        });
+        // When watching classic Bleach Season 1, skip standalone TYBW folder
+        if (isAnimeServer && !isTybw && isTybwFolder) return [];
 
-        if (epMatches.length > 0) {
-            return epMatches.map(item => makeStream(item, server.url));
-        }
-
-        // For anime sequels (e.g. Bleach TYBW in TMDB Season 2, but folders label as Season 17 or Season 1)
-        if (isAnimeServer && (season === 2 || season === 17)) {
+        if (isTybw) {
+            // TYBW episode: search S17 (Folder 1), S01 (Folder 2), or absolute E<ep> matching TYBW
             const tybwPatterns = [`S17E0*${epPad}(?![0-9])`, `S01E0*${epPad}(?![0-9])`, `E0*${epPad}(?![0-9])`];
             for (const pat of tybwPatterns) {
                 const tybwMatches = await h5aiSearch(server, pat, folderHref);
                 const tybwFiles = tybwMatches.filter(item => {
                     const path = decodeURIComponent(item.href);
                     const fn = path.split("/").pop();
-                    const isTybw = /thousand|tybw/i.test(path);
+                    const isTybwFile = /thousand|tybw/i.test(path);
+                    const epRegex = new RegExp(`e0*${epPad}(?![0-9])`, "i");
                     return /\.(mkv|mp4|avi)$/i.test(path) &&
-                        isTybw &&
-                        passesEpisodeFilter(fn, season, episode, true) &&
+                        isTybwFile &&
+                        epRegex.test(fn) &&
                         !path.toLowerCase().includes("/specials/");
                 });
                 if (tybwFiles.length > 0) {
                     return tybwFiles.map(item => makeStream(item, server.url));
                 }
             }
+            return [];
         }
 
-        // Fallback: search absolute episode number E<ep>
+        // Standard Season pattern SxxEyy
+        const epPattern = `S${sPad}E0*${epPad}(?![0-9])`;
+        const nestedMatches = await h5aiSearch(server, epPattern, folderHref);
+        const epMatches = nestedMatches.filter(item => {
+            const path = decodeURIComponent(item.href);
+            return /\.(mkv|mp4|avi)$/i.test(path) &&
+                passesEpisodeFilter(path.split("/").pop(), season, episode, false) &&
+                !path.toLowerCase().includes("/specials/") &&
+                !(isAnimeServer && /thousand|tybw/i.test(path));
+        });
+
+        if (epMatches.length > 0) {
+            return epMatches.map(item => makeStream(item, server.url));
+        }
+
+        // Fallback: search absolute episode number E<ep> (e.g. S02E25 when season === 1)
         const fallbackMatches = await h5aiSearch(server, `E0*${epPad}(?![0-9])`, folderHref);
         return fallbackMatches
             .filter(item => {
                 const path = decodeURIComponent(item.href);
                 const fn = path.split("/").pop();
-                if (isAnimeServer && season === 1 && /thousand|tybw/i.test(fn)) return false;
+                if (isAnimeServer && /thousand|tybw/i.test(fn)) return false;
                 return /\.(mkv|mp4|avi)$/i.test(path) &&
                     passesEpisodeFilter(fn, season, episode, isAnimeServer) &&
                     !path.toLowerCase().includes("/specials/");
