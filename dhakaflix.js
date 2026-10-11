@@ -183,11 +183,47 @@ function matchesMovieYear(lowerPath, year) {
     return acceptable.some(val => lowerPath.includes(val));
 }
 
+function extractTvFolderInfo(path) {
+    const parts = decodeURIComponent(path).split("/").filter(Boolean);
+    for (let i = parts.length - 1; i >= 0; i--) {
+        const p = parts[i];
+        const match = p.match(/^([^(]+?)\s*\((?:(?:TV\s*)?(?:Series|Cartoon|Mini\s*Series)\s*)?(\d{4})/i);
+        if (match) {
+            return { title: cleanTitle(match[1]).toLowerCase(), year: match[2] };
+        }
+    }
+    return null;
+}
+
+function matchesTvFolder(path, targetTitle, targetYear) {
+    const info = extractTvFolderInfo(path);
+    if (!info) {
+        return matchesMovieTitle(path, targetTitle);
+    }
+    const cleanedTarget = cleanTitle(targetTitle).toLowerCase();
+    const titleOk = (info.title === cleanedTarget) ||
+                    (stripArticles(info.title) === stripArticles(cleanedTarget)) ||
+                    matchesMovieTitle(path, targetTitle);
+    if (!titleOk) return false;
+
+    if (targetYear && info.year) {
+        const ty = parseInt(targetYear, 10);
+        const fy = parseInt(info.year, 10);
+        if (!isNaN(ty) && !isNaN(fy)) {
+            if (Math.abs(ty - fy) > 1) return false;
+        }
+    }
+    return true;
+}
+
 function passesEpisodeFilter(filename, season, episode) {
     const s = String(season).padStart(2, "0");
-    const e = String(episode).padStart(2, "0");
-    const pattern = new RegExp(`s${s}[. _-]?e${e}|\\b${season}x${e}\\b|\\be${e}\\b|episode[._ -]?0?${episode}\\b`, "i");
-    return pattern.test(filename);
+    const ep = String(episode);
+    const p1 = new RegExp(`s${s}[. _-]?e0*${ep}(?![0-9])`, "i");
+    const p2 = new RegExp(`(?:^|[^a-zA-Z0-9])${season}x0*${ep}(?![0-9])`, "i");
+    const p3 = new RegExp(`(?:^|[^a-zA-Z0-9])e0*${ep}(?![0-9])`, "i");
+    const p4 = new RegExp(`episode[._ -]?0*${ep}(?![0-9])`, "i");
+    return p1.test(filename) || p2.test(filename) || p3.test(filename) || p4.test(filename);
 }
 
 function extractAudioDetails(filename, href) {
@@ -282,8 +318,14 @@ async function h5aiSearch(server, pattern, href) {
     return (data && Array.isArray(data.search)) ? data.search : [];
 }
 
-async function searchTvEpisodes(server, query, season, episode) {
-    const rootMatches = await h5aiSearch(server, query);
+async function searchTvEpisodes(server, query, season, episode, targetTitle, year) {
+    let rootMatches = [];
+    if (year) {
+        rootMatches = await h5aiSearch(server, `${query}.*${year}`);
+    }
+    if (!rootMatches.length) {
+        rootMatches = await h5aiSearch(server, query);
+    }
     if (!rootMatches.length) return [];
 
     const fileResults = [];
@@ -295,32 +337,37 @@ async function searchTvEpisodes(server, query, season, episode) {
 
         if (isVideo) {
             const filename = decodedHref.split("/").pop();
-            if (passesEpisodeFilter(filename, season, episode) && !decodedHref.toLowerCase().includes("/specials/")) {
+            if (matchesTvFolder(decodedHref, targetTitle, year) &&
+                passesEpisodeFilter(filename, season, episode) &&
+                !decodedHref.toLowerCase().includes("/specials/")) {
                 fileResults.push(makeStream(item, server.url));
             }
         } else if (item.href.endsWith("/")) {
-            foldersToRecurse.push(item.href);
+            if (matchesTvFolder(decodedHref, targetTitle, year)) {
+                foldersToRecurse.push(item.href);
+            }
         }
     }
 
     if (fileResults.length > 0) return fileResults;
 
     const sPad = String(season).padStart(2, "0");
-    const epPad = String(episode).padStart(2, "0");
-    const epPattern = `S${sPad}E${epPad}`;
+    const epPattern = `S${sPad}E0*${episode}(?![0-9])`;
 
     const subSearches = foldersToRecurse.map(async (folderHref) => {
         const nestedMatches = await h5aiSearch(server, epPattern, folderHref);
         const epMatches = nestedMatches.filter(item => {
             const path = decodeURIComponent(item.href);
-            return /\.(mkv|mp4|avi)$/i.test(path) && !path.toLowerCase().includes("/specials/");
+            return /\.(mkv|mp4|avi)$/i.test(path) &&
+                passesEpisodeFilter(path.split("/").pop(), season, episode) &&
+                !path.toLowerCase().includes("/specials/");
         });
 
         if (epMatches.length > 0) {
             return epMatches.map(item => makeStream(item, server.url));
         }
 
-        const fallbackMatches = await h5aiSearch(server, `E${epPad}`, folderHref);
+        const fallbackMatches = await h5aiSearch(server, `E0*${episode}(?![0-9])`, folderHref);
         return fallbackMatches
             .filter(item => {
                 const path = decodeURIComponent(item.href);
@@ -397,7 +444,20 @@ async function getStreams(tmdbId, mediaType, season, episode) {
             for (const q of buildSearchQueries(meta.origTitle)) queriesToTry.add(q);
         }
 
-        const targetServers = SERVERS.filter(s => s.types.includes(mediaType));
+        let targetServers;
+        if (mediaType === "tv") {
+            if (meta.isAnimation) {
+                targetServers = [
+                    SERVERS.find(s => s.id === "df10"),
+                    ...SERVERS.filter(s => s.types.includes("tv") && s.id !== "df10")
+                ].filter(Boolean);
+            } else {
+                targetServers = SERVERS.filter(s => s.types.includes("tv") && s.id !== "df10");
+            }
+        } else {
+            targetServers = SERVERS.filter(s => s.types.includes(mediaType));
+        }
+
         const allStreams = [];
         const seenUrls = new Set();
 
@@ -406,7 +466,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 
             const tasks = targetServers.map(server => {
                 if (mediaType === "tv") {
-                    return searchTvEpisodes(server, query, season, episode);
+                    return searchTvEpisodes(server, query, season, episode, meta.title, meta.year);
                 } else {
                     return searchMovies(server, query, meta.title, meta.year);
                 }
