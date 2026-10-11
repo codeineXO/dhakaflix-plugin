@@ -3,26 +3,46 @@
 A high-speed scraper plugin for Nuvio to stream Movies, TV Series, Anime, and Cartoons directly from the DhakaFlix BDIX FTP / HTTP server.
 
 ## Features
-- **All Servers Covered**:
+
+- **Full BDIX Server Coverage**:
   - `http://172.16.50.7/` — English Movies (720p), Kolkata Bangla Movies, Foreign Movies, 3D
-  - `http://172.16.50.10/` — Anime & Cartoon TV Series, Documentaries, WWE
+  - `http://172.16.50.10/` — Anime & Cartoon TV Series
   - `http://172.16.50.12/` — Mainstream TV & Web Series
   - `http://172.16.50.14/` — English Movies (1080p), Animation Movies (720p & 1080p), Hindi & South Indian Movies, Korean Series
-- **Dual & Multi-Audio Detection**: Correctly identifies Hindi, English, Japanese, and Bangla audio tracks.
-- **Two-Stage Traversal**: Resolves anime with Romaji filenames and season directories automatically.
-- **Zero Authentication**: Works directly with BDIX byte-range streaming in Nuvio's native MPV player.
+- **Franchise Disambiguation & Sequel Isolation**:
+  - Distinguishes spinoffs, sequels, and numbered series (*Steins;Gate* vs. *Steins;Gate 0*).
+  - Isolates live-action adaptations from animated series (*One Piece* TV anime vs. live-action).
+  - Year-based release filtering (+/- 1 year tolerance) to avoid misattributed remakes.
+- **Multi-Arc Anime & Continuous Episode Traversal**:
+  - Resolves arc-named folders (*Demon Slayer: Mugen Train*, *Swordsmith Village*, *Bleach: Thousand-Year Blood War*).
+  - Resolves continuous absolute episode numbering across split seasons (*Hunter x Hunter*, *Black Clover*).
+  - Special handling for Romaji titles and dual-audio filenames (*K-ON!*, *JoJo's Bizarre Adventure*, *Spy x Family*).
+- **Quality & Audio Stream Formatting**:
+  - Detects advanced multi-audio combinations (e.g., DDP 5.1, TrueHD 7.1, DTS-HD, AAC multi-audio).
+  - Structured stream cards showing resolution, audio codecs, and file sizes.
+  - Zero-width character ranking tags for native quality sorting (2160p down to 480p).
+- **Direct BDIX Streaming**:
+  - Zero login or authentication required; direct byte-range streaming via Nuvio's internal MPV player.
 
 ## How to Install in Nuvio
 
-### Method 1: Host on GitHub / Codeberg (Recommended)
-1. Push this folder to a GitHub or Codeberg repository.
-2. Get the raw link to `manifest.json` (e.g., `https://raw.githubusercontent.com/<username>/dhakaflix-plugin/main/manifest.json`).
-3. Open Nuvio $\rightarrow$ **Settings** $\rightarrow$ **Plugins** $\rightarrow$ **Add Repository** and paste the raw manifest URL.
+### Method 1: GitHub / Git Host (Recommended for Sharing)
+1. Fork or push this repository to your GitHub/Codeberg account.
+2. Copy the **Raw** URL to `manifest.json`:
+   ```
+   https://raw.githubusercontent.com/<username>/dhakaflix-plugin/main/manifest.json
+   ```
+3. Open Nuvio $\rightarrow$ **Settings** $\rightarrow$ **Plugins** $\rightarrow$ **Add Repository**.
+4. Paste the URL and click **Add**.
+5. Click **Refresh** anytime to receive updates pushed to `main`.
 
-### Method 2: Local Host (Instant testing)
-1. In a terminal, run:
+### Method 2: Local Network / Dev Server
+1. Serve the plugin directory over HTTP:
    ```powershell
    npx serve e:\Github\dhakaflix-plugin -p 8080
    ```
 2. Open Nuvio $\rightarrow$ **Settings** $\rightarrow$ **Plugins** $\rightarrow$ **Add Repository**.
 3. Paste: `http://localhost:8080/manifest.json`
+
+## Requirements
+- **BDIX Connection**: DhakaFlix servers reside on internal BDIX routing (`172.16.50.x`). Users must be connected through an ISP with active BDIX peering in Bangladesh to stream files.
