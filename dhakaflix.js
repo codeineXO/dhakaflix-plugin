@@ -230,20 +230,95 @@ function matchesTvFolder(path, targetTitle, targetYear, serverId) {
     return true;
 }
 
-function passesEpisodeFilter(filename, season, episode, allowAbsolute) {
+function extractSeasonFromPath(path) {
+    const decoded = decodeURIComponent(path || "");
+    const filename = decoded.split("/").filter(Boolean).pop() || "";
+
+    // 1. Filename SxxExx or Sxx
+    const fnMatch = filename.match(/\bS(\d{1,2})[._ -]?(?:E\d+|x\d+|\b)/i);
+    if (fnMatch) return parseInt(fnMatch[1], 10);
+
+    // 2. Directory Season X or Series X
+    const dirMatch = decoded.match(/(?:^|\/)(?:Season|Series)[._ -]?(\d{1,2})(?:[^\/]*)\//i);
+    if (dirMatch) return parseInt(dirMatch[1], 10);
+
+    // 3. Short directory /S\d+/
+    const shortDirMatch = decoded.match(/(?:^|\/)S(\d{1,2})\//i);
+    if (shortDirMatch) return parseInt(shortDirMatch[1], 10);
+
+    return null;
+}
+
+function cleanFilenameForEp(fn, targetTitle) {
+    let s = fn.replace(/\.(mkv|mp4|avi|webm|ts|m4v)$/i, "");
+    s = s.replace(/\[[^\]]+\]/g, " ");
+    if (targetTitle) {
+        const titleNums = targetTitle.match(/\d+/g);
+        if (titleNums) {
+            titleNums.forEach(n => {
+                s = s.replace(new RegExp(`(?<![0-9])${n}(?![0-9])`, "g"), " ");
+            });
+        }
+    }
+    s = s.replace(/\b(?:2160p|1080p|720p|480p|576p|360p|4k|2k|uhd|fhd|hd)\b/gi, " ");
+    s = s.replace(/\b(?:10bit|8bit|12bit|10-bit|8-bit)\b/gi, " ");
+    s = s.replace(/\b(?:7\.1|5\.1|2\.0|1\.0)\b/g, " ");
+    s = s.replace(/\b(?:x264|x265|h264|h265|hevc|avc|av1|vc1|aac|ac3|eac3|ddp|dts|truehd|flac|mp3|opus)\b/gi, " ");
+    s = s.replace(/\b(?:bluray|blu-ray|bdrip|brrip|webrip|web-rip|web-dl|webdl|hdtv|remux|proper|repack)\b/gi, " ");
+    s = s.replace(/\b(?:dual[._ -]?audio|multi[._ -]?audio|hindi|english|japanese|bangla|bengali|esub|msubs?|sub|dub|dubbed)\b/gi, " ");
+    s = s.replace(/\b(?:19|20)\d{2}\b/g, " ");
+    return s.trim();
+}
+
+function passesEpisodeFilter(pathOrFilename, season, episode, allowAbsolute, targetTitle) {
+    const raw = decodeURIComponent(pathOrFilename || "");
+    const filename = raw.split("/").filter(Boolean).pop() || "";
+    const pathSeason = extractSeasonFromPath(raw);
+
+    if (!allowAbsolute) {
+        if (pathSeason !== null && pathSeason !== season) {
+            return false;
+        }
+    }
+
     const s = String(season).padStart(2, "0");
     const ep = String(episode);
-    const p1 = new RegExp(`s${s}[. _-]?e0*${ep}(?![0-9])`, "i");
+
+    // 1. Explicit SxxExx or Sxx.Exx
+    const p1 = new RegExp(`\\bs${s}[. _-]?e0*${ep}(?![0-9])`, "i");
+    if (p1.test(filename)) return true;
+
+    // 2. SxEE (e.g., 1x47)
     const p2 = new RegExp(`(?:^|[^a-zA-Z0-9])${season}x0*${ep}(?![0-9])`, "i");
-    const p3 = new RegExp(`(?:^|[^a-zA-Z0-9])e0*${ep}(?![0-9])`, "i");
-    const p4 = new RegExp(`episode[._ -]?0*${ep}(?![0-9])`, "i");
-    if (p1.test(filename) || p2.test(filename) || p3.test(filename) || p4.test(filename)) {
+    if (p2.test(filename)) return true;
+
+    // 3. Exx or Episode xx (when file doesn't have a different season marker)
+    const p3 = new RegExp(`(?:^|[^a-zA-Z0-9])(?:e|ep|episode)[._ -]?0*${ep}(?![0-9])`, "i");
+    if (p3.test(filename)) {
+        const fnSeason = filename.match(/\bS(\d{1,2})[._ -]?E\d+/i);
+        if (fnSeason && parseInt(fnSeason[1], 10) !== season && !allowAbsolute) {
+            return false;
+        }
         return true;
     }
+
+    // 4. Standalone episode number in cleaned filename
+    const hasExplicitOtherEp = /(?:^|[^a-zA-Z0-9])(?:e|ep|episode)[._ -]?\d+/i.test(filename) ||
+        /\bS\d{1,2}[._ -]?E\d+/i.test(filename);
+    if (!hasExplicitOtherEp) {
+        const cleaned = cleanFilenameForEp(filename, targetTitle);
+        const pStandalone = new RegExp(`(?<![0-9])0*${ep}(?![0-9])`);
+        if (pStandalone.test(cleaned)) {
+            return true;
+        }
+    }
+
+    // 5. Absolute cross-season fallback
     if (allowAbsolute) {
-        const pAbs = new RegExp(`s\\d+e0*${ep}(?![0-9])`, "i");
+        const pAbs = new RegExp(`\\bs\\d+e0*${ep}(?![0-9])`, "i");
         if (pAbs.test(filename)) return true;
     }
+
     return false;
 }
 
@@ -359,7 +434,7 @@ async function searchTvEpisodes(server, query, season, episode, targetTitle, yea
         if (isVideo) {
             const filename = decodedHref.split("/").pop();
             if (matchesTvFolder(decodedHref, targetTitle, year, server.id) &&
-                passesEpisodeFilter(filename, season, episode, false) &&
+                passesEpisodeFilter(decodedHref, season, episode, false, targetTitle) &&
                 !decodedHref.toLowerCase().includes("/specials/")) {
                 fileResults.push(makeStream(item, server.url));
             }
@@ -376,7 +451,8 @@ async function searchTvEpisodes(server, query, season, episode, targetTitle, yea
     const sPad = String(season).padStart(2, "0");
     const epPad = String(episode);
     const isAnimeServer = (server.id === "df10");
-    const isTybw = isAnimeServer && (season === 2 || season === 17 || /thousand|tybw/i.test(targetTitle));
+    const isBleach = /bleach/i.test(targetTitle);
+    const isTybw = isAnimeServer && (/thousand|tybw/i.test(targetTitle) || (isBleach && (season === 2 || season === 17)));
 
     const subSearches = foldersToRecurse.map(async (folderHref) => {
         const isTybwFolder = /thousand|tybw/i.test(folderHref);
@@ -412,7 +488,7 @@ async function searchTvEpisodes(server, query, season, episode, targetTitle, yea
         const epMatches = nestedMatches.filter(item => {
             const path = decodeURIComponent(item.href);
             return /\.(mkv|mp4|avi)$/i.test(path) &&
-                passesEpisodeFilter(path.split("/").pop(), season, episode, false) &&
+                passesEpisodeFilter(path, season, episode, false, targetTitle) &&
                 !path.toLowerCase().includes("/specials/") &&
                 !(isAnimeServer && /thousand|tybw/i.test(path));
         });
@@ -421,18 +497,36 @@ async function searchTvEpisodes(server, query, season, episode, targetTitle, yea
             return epMatches.map(item => makeStream(item, server.url));
         }
 
-        // Fallback: search absolute episode number E<ep> (e.g. S02E25 when season === 1)
-        const fallbackMatches = await h5aiSearch(server, `E0*${epPad}(?![0-9])`, folderHref);
-        return fallbackMatches
-            .filter(item => {
+        // If no strict SxxEyy matches, search by episode number within show folder
+        const epNumPattern = `(?<![0-9])0*${epPad}(?![0-9])`;
+        const numMatches = await h5aiSearch(server, epNumPattern, folderHref);
+
+        // Tier 1: Strict Season Match (pathSeason === requestedSeason)
+        const strictMatches = numMatches.filter(item => {
+            const path = decodeURIComponent(item.href);
+            return /\.(mkv|mp4|avi)$/i.test(path) &&
+                passesEpisodeFilter(path, season, episode, false, targetTitle) &&
+                !path.toLowerCase().includes("/specials/") &&
+                !(isAnimeServer && /thousand|tybw/i.test(path));
+        });
+
+        if (strictMatches.length > 0) {
+            return strictMatches.map(item => makeStream(item, server.url));
+        }
+
+        // Tier 2: Absolute Fallback for Anime only (e.g. Bleach S02E25 when season === 1)
+        if (isAnimeServer) {
+            const fallbackMatches = numMatches.filter(item => {
                 const path = decodeURIComponent(item.href);
-                const fn = path.split("/").pop();
-                if (isAnimeServer && /thousand|tybw/i.test(fn)) return false;
                 return /\.(mkv|mp4|avi)$/i.test(path) &&
-                    passesEpisodeFilter(fn, season, episode, isAnimeServer) &&
-                    !path.toLowerCase().includes("/specials/");
-            })
-            .map(item => makeStream(item, server.url));
+                    passesEpisodeFilter(path, season, episode, true, targetTitle) &&
+                    !path.toLowerCase().includes("/specials/") &&
+                    !(isAnimeServer && !isTybw && /thousand|tybw/i.test(path));
+            });
+            return fallbackMatches.map(item => makeStream(item, server.url));
+        }
+
+        return [];
     });
 
     const nestedStreams = await Promise.all(subSearches);
