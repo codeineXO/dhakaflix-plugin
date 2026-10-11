@@ -145,54 +145,81 @@ function passesEpisodeFilter(filename, season, episode) {
     return pattern.test(filename);
 }
 
+function extractAudioDetails(filename, href) {
+    const raw = decodeURIComponent(filename + " " + href);
+    const parts = [];
+
+    const audioBracketMatch = raw.match(/\[(Dual Audio|Multi Audio|Hindi Dubbed|English Dubbed|Dubbed)[^\]]*\]\s*\[([^\]]+)\]/i);
+    if (audioBracketMatch) {
+        parts.push(audioBracketMatch[1]);
+        parts.push(audioBracketMatch[2].replace(/\+/g, " + "));
+    } else {
+        const singleBracket = raw.match(/\[(Dual Audio|Multi Audio|Hindi Dubbed|English Dubbed|Hindi \+ English|[^\]]*Audio[^\]]*)\]/i);
+        if (singleBracket) {
+            parts.push(singleBracket[1]);
+        } else {
+            if (/dual[- ]?audio/i.test(raw)) parts.push("Dual Audio");
+            else if (/multi[- ]?audio/i.test(raw)) parts.push("Multi Audio");
+
+            const langs = [];
+            if (/hindi/i.test(raw)) langs.push("Hindi");
+            if (/english/i.test(raw)) langs.push("English");
+            if (/japanese/i.test(raw)) langs.push("Japanese");
+            if (/bangla|bengali/i.test(raw)) langs.push("Bangla");
+            if (langs.length) parts.push(langs.join(" + "));
+        }
+    }
+
+    let codec = "";
+    for (const [re, label] of AUDIO_TABLE) {
+        if (re.test(raw)) { codec = label; break; }
+    }
+    if (/\batmos\b/i.test(raw)) codec += (codec ? " " : "") + "Atmos";
+    if (codec && !parts.some(p => p.includes(codec))) parts.push(codec);
+
+    return parts.join(" • ") || "Original Audio";
+}
+
 function makeStream(item, serverUrl) {
     const filename = decodeURIComponent(item.href.split("/").filter(Boolean).pop() || "");
     const rawQuality = parseQuality(filename);
     const quality = rawQuality !== "hd" ? rawQuality : parseQuality(decodeURIComponent(item.href));
     const combined = (filename + " " + item.href).toLowerCase();
 
-    const langParts = [];
-    if (/\b(?:multi|dual|multi audio|dual audio)\b/.test(combined)) langParts.push("Dual Audio");
-    if (/\b(?:english|eng)\b/.test(combined)) langParts.push("English");
-    if (/\bhindi\b/.test(combined)) langParts.push("Hindi");
-    if (/\bbangla|bengali\b/.test(combined)) langParts.push("Bangla");
-    if (/\bjapanese|jap\b/.test(combined)) langParts.push("Japanese");
-    if (/\bkorean|kor\b/.test(combined)) langParts.push("Korean");
-
     let source = "WEB-DL";
     if (/\bbluray|bdrip\b/.test(combined)) source = "Blu-ray";
     else if (/\b(?:webrip|hdrip)\b/.test(combined)) source = "WEB-Rip";
+    else if (/\bhdtv\b/.test(combined)) source = "HDTV";
 
     const isImax = /\bimax\b/.test(combined);
     const isHdr = /\bhdr10\+|hdr10p|hdr10|hdr\b/.test(combined) ? "HDR" : "";
     const isDv = /\b(?:dv|dolby\s*vision)\b/.test(combined) ? "DV" : "";
     const is10Bit = /\b10bit\b/.test(combined) ? "10Bit" : "";
-    const codec = /\b(?:hevc|x265|265)\b/.test(combined) ? "H.265" : "H.264";
 
-    let audio = "2.0";
-    for (const [re, label] of AUDIO_TABLE) {
-        if (re.test(combined)) { audio = label; break; }
-    }
-    if (/\batmos\b/.test(combined)) audio += " Atmos";
+    // TOP LINE: Resolution and video quality only (no DhakaFlix)
+    const qualityLabel = quality.toUpperCase();
+    const topParts = [qualityLabel, source, isImax && "IMAX", isHdr, isDv, is10Bit].filter(Boolean);
+    const topLine = topParts.join(" • ");
+
+    // BELOW: full release filename, audio track details, file size
+    const audioDetails = extractAudioDetails(filename, item.href);
+    const fileSize = formatBytes(item.size);
+
+    const belowLines = [
+        filename,
+        audioDetails,
+        fileSize
+    ].filter(Boolean).join("\n");
 
     const rank = QUALITY_RANK[quality] ?? 0;
     const sortTag = getSortTag(rank);
-    const qualityLabel = quality.toUpperCase();
-
-    const line1 = (langParts.length ? langParts.join(" \u2022 ") : "BDIX") + (item.size ? " \u2022 " + formatBytes(item.size) : "");
-    const line2 = [source, isImax && "IMAX", isHdr, isDv, is10Bit].filter(Boolean).join(" \u2022 ");
-    const line3 = [codec, audio].filter(Boolean).join(" \u2022 ");
-    const details = [line1, line2, line3].filter(Boolean).join("\n");
-
     const fullUrl = `${serverUrl}${item.href}`;
 
     return {
-        name: sortTag + PROVIDER + " \u2022 " + qualityLabel,
+        name: sortTag + topLine,
         title: filename,
-        size: details,
+        size: belowLines,
         url: fullUrl,
-        quality: quality,
-        provider: PROVIDER,
         headers: { "User-Agent": HEADERS["User-Agent"] },
     };
 }
