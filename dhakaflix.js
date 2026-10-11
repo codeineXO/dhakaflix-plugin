@@ -52,7 +52,7 @@ async function httpPost(url, body) {
 }
 
 async function getTmdbMeta(tmdbId, mediaType) {
-    const apiKey = (typeof TMDB_API_KEY !== "undefined" && TMDB_API_KEY) ? TMDB_API_KEY : "";
+    const apiKey = (typeof TMDB_API_KEY !== "undefined" && TMDB_API_KEY) ? TMDB_API_KEY : "01926d2187b6a5d861eefc750e9df3e3";
     if (!apiKey) return null;
 
     const endpoint = mediaType === "tv" ? "tv" : "movie";
@@ -120,12 +120,57 @@ function extractFolderTitle(path) {
     return cleanTitle(last.replace(/\.(mkv|mp4|avi)$/i, "")).toLowerCase();
 }
 
+function buildSearchQueries(title) {
+    const raw = (title || "").trim();
+    if (!raw) return [];
+
+    const queries = new Set();
+    const words = raw.replace(/[^a-zA-Z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
+
+    // 1. Regex query matching words with any separator (e.g. "Spider.*Man.*Brand.*New.*Day")
+    if (words.length > 0) {
+        queries.add(words.join(".*"));
+    }
+
+    // 2. If title has a colon, dash or hyphen, also add the subtitle part (e.g. "Brand New Day")
+    const subParts = raw.split(/[:\-\—]/).map(s => s.trim()).filter(Boolean);
+    if (subParts.length > 1) {
+        const sub = subParts[subParts.length - 1];
+        const subWords = sub.replace(/[^a-zA-Z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
+        if (subWords.length > 0) {
+            queries.add(subWords.join(".*"));
+        }
+    }
+
+    // 3. Without articles ("The", "A", "An")
+    const withoutArticle = raw.replace(/^(?:the|a|an)\s+/i, "").trim();
+    if (withoutArticle && withoutArticle !== raw) {
+        const noArtWords = withoutArticle.replace(/[^a-zA-Z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
+        if (noArtWords.length > 0) {
+            queries.add(noArtWords.join(".*"));
+        }
+    }
+
+    // 4. Clean literal string as fallback
+    if (words.length > 0) {
+        queries.add(words.join(" "));
+    }
+
+    return Array.from(queries);
+}
+
 function matchesMovieTitle(itemHref, targetTitle) {
     const folderTitle = extractFolderTitle(itemHref);
     const cleanedTarget = cleanTitle(targetTitle).toLowerCase();
     if (!folderTitle || !cleanedTarget) return false;
     if (folderTitle === cleanedTarget) return true;
     if (stripArticles(folderTitle) === stripArticles(cleanedTarget)) return true;
+
+    const fWords = folderTitle.split(/\s+/).filter(Boolean);
+    const tWords = cleanedTarget.split(/\s+/).filter(Boolean);
+    if (tWords.length > 1 && tWords.every(w => folderTitle.includes(w))) return true;
+    if (fWords.length > 1 && fWords.every(w => cleanedTarget.includes(w))) return true;
+
     return false;
 }
 
@@ -346,18 +391,10 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         const meta = await getTmdbMeta(tmdbId, mediaType);
         if (!meta || !meta.title) return [];
 
-        const baseTitle = cleanTitle(meta.title);
-        const titleWithoutArticle = stripArticles(baseTitle);
-
         const queriesToTry = new Set();
-        queriesToTry.add(baseTitle);
-        if (titleWithoutArticle) queriesToTry.add(titleWithoutArticle);
-
-        if (meta.origTitle) {
-            const baseOrig = cleanTitle(meta.origTitle);
-            const origWithoutArticle = stripArticles(baseOrig);
-            if (baseOrig) queriesToTry.add(baseOrig);
-            if (origWithoutArticle) queriesToTry.add(origWithoutArticle);
+        for (const q of buildSearchQueries(meta.title)) queriesToTry.add(q);
+        if (meta.origTitle && meta.origTitle !== meta.title) {
+            for (const q of buildSearchQueries(meta.origTitle)) queriesToTry.add(q);
         }
 
         const targetServers = SERVERS.filter(s => s.types.includes(mediaType));
