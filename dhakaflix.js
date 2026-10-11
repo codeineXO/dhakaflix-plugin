@@ -459,6 +459,8 @@ function makeStream(item, serverUrl) {
         size: belowLines,
         url: fullUrl,
         headers: { "User-Agent": HEADERS["User-Agent"] },
+        _rank: rank,
+        _size: item.size || 0,
     };
 }
 
@@ -700,6 +702,13 @@ async function getStreams(tmdbId, mediaType, season, episode) {
             }
 
             if (allStreams.length > 0) break;
+        }
+
+        // Sort descending: highest resolution first, then largest file size
+        allStreams.sort((a, b) => (b._rank - a._rank) || ((b._size || 0) - (a._size || 0)));
+        for (const s of allStreams) {
+            delete s._rank;
+            delete s._size;
         }
 
         return allStreams;
