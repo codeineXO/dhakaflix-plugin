@@ -2,7 +2,7 @@
   "name": "DhakaFlix BDIX",
   "version": "1.0.0",
   "description": "DhakaFlix BDIX high-speed scraper for Movies, TV Series, Anime & Cartoons",
-  "author": "Nuvio",
+  "author": "CodeineXO",
   "scrapers": [
     {
       "id": "dhakaflix",
