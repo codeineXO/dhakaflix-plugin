@@ -187,43 +187,64 @@ function extractTvFolderInfo(path) {
     const parts = decodeURIComponent(path).split("/").filter(Boolean);
     for (let i = parts.length - 1; i >= 0; i--) {
         const p = parts[i];
-        const match = p.match(/^([^(]+?)\s*\((?:(?:TV\s*)?(?:Series|Cartoon|Mini\s*Series)\s*)?(\d{4})/i);
+        const match = p.match(/^([^(]+?)\s*\((?:(?:TV\s*)?(?:Series|Cartoon|Mini\s*Series)\s*)?(\d{4})(?:[–\-](\d{4})?)?/i);
         if (match) {
-            return { title: cleanTitle(match[1]).toLowerCase(), year: match[2] };
+            const rawTitle = match[1].trim();
+            const baseTitle = rawTitle.split(/[:\-\—]/)[0].trim();
+            return {
+                title: cleanTitle(rawTitle).toLowerCase(),
+                baseTitle: cleanTitle(baseTitle).toLowerCase(),
+                startYear: match[2],
+                endYear: match[3] || null,
+            };
         }
     }
     return null;
 }
 
-function matchesTvFolder(path, targetTitle, targetYear) {
+function matchesTvFolder(path, targetTitle, targetYear, serverId) {
     const info = extractTvFolderInfo(path);
     if (!info) {
         return matchesMovieTitle(path, targetTitle);
     }
     const cleanedTarget = cleanTitle(targetTitle).toLowerCase();
     const titleOk = (info.title === cleanedTarget) ||
+                    (info.baseTitle === cleanedTarget) ||
                     (stripArticles(info.title) === stripArticles(cleanedTarget)) ||
+                    (stripArticles(info.baseTitle) === stripArticles(cleanedTarget)) ||
                     matchesMovieTitle(path, targetTitle);
     if (!titleOk) return false;
 
-    if (targetYear && info.year) {
+    if (serverId === "df10") {
+        return true;
+    }
+
+    if (targetYear && info.startYear) {
         const ty = parseInt(targetYear, 10);
-        const fy = parseInt(info.year, 10);
-        if (!isNaN(ty) && !isNaN(fy)) {
-            if (Math.abs(ty - fy) > 1) return false;
+        const sy = parseInt(info.startYear, 10);
+        const ey = info.endYear ? parseInt(info.endYear, 10) : sy;
+        if (!isNaN(ty) && !isNaN(sy)) {
+            if (ty < sy - 1 || ty > ey + 1) return false;
         }
     }
     return true;
 }
 
-function passesEpisodeFilter(filename, season, episode) {
+function passesEpisodeFilter(filename, season, episode, allowAbsolute) {
     const s = String(season).padStart(2, "0");
     const ep = String(episode);
     const p1 = new RegExp(`s${s}[. _-]?e0*${ep}(?![0-9])`, "i");
     const p2 = new RegExp(`(?:^|[^a-zA-Z0-9])${season}x0*${ep}(?![0-9])`, "i");
     const p3 = new RegExp(`(?:^|[^a-zA-Z0-9])e0*${ep}(?![0-9])`, "i");
     const p4 = new RegExp(`episode[._ -]?0*${ep}(?![0-9])`, "i");
-    return p1.test(filename) || p2.test(filename) || p3.test(filename) || p4.test(filename);
+    if (p1.test(filename) || p2.test(filename) || p3.test(filename) || p4.test(filename)) {
+        return true;
+    }
+    if (allowAbsolute) {
+        const pAbs = new RegExp(`s\\d+e0*${ep}(?![0-9])`, "i");
+        if (pAbs.test(filename)) return true;
+    }
+    return false;
 }
 
 function extractAudioDetails(filename, href) {
@@ -320,7 +341,7 @@ async function h5aiSearch(server, pattern, href) {
 
 async function searchTvEpisodes(server, query, season, episode, targetTitle, year) {
     let rootMatches = [];
-    if (year) {
+    if (server.id !== "df10" && year) {
         rootMatches = await h5aiSearch(server, `${query}.*${year}`);
     }
     if (!rootMatches.length) {
@@ -337,29 +358,35 @@ async function searchTvEpisodes(server, query, season, episode, targetTitle, yea
 
         if (isVideo) {
             const filename = decodedHref.split("/").pop();
-            if (matchesTvFolder(decodedHref, targetTitle, year) &&
-                passesEpisodeFilter(filename, season, episode) &&
+            if (matchesTvFolder(decodedHref, targetTitle, year, server.id) &&
+                passesEpisodeFilter(filename, season, episode, false) &&
                 !decodedHref.toLowerCase().includes("/specials/")) {
                 fileResults.push(makeStream(item, server.url));
             }
         } else if (item.href.endsWith("/")) {
-            if (matchesTvFolder(decodedHref, targetTitle, year)) {
+            if (matchesTvFolder(decodedHref, targetTitle, year, server.id)) {
                 foldersToRecurse.push(item.href);
             }
         }
     }
 
-    if (fileResults.length > 0) return fileResults;
+    // If folders exist, exclusively search inside show folders to ensure correct season/part matching
+    if (foldersToRecurse.length === 0 && fileResults.length > 0) return fileResults;
 
     const sPad = String(season).padStart(2, "0");
-    const epPattern = `S${sPad}E0*${episode}(?![0-9])`;
+    const epPad = String(episode);
+    const isAnimeServer = (server.id === "df10");
 
     const subSearches = foldersToRecurse.map(async (folderHref) => {
+        const isSequelOrTybw = /thousand|tybw/i.test(folderHref);
+        if (isAnimeServer && season === 1 && isSequelOrTybw) return [];
+
+        const epPattern = `S${sPad}E0*${epPad}(?![0-9])`;
         const nestedMatches = await h5aiSearch(server, epPattern, folderHref);
         const epMatches = nestedMatches.filter(item => {
             const path = decodeURIComponent(item.href);
             return /\.(mkv|mp4|avi)$/i.test(path) &&
-                passesEpisodeFilter(path.split("/").pop(), season, episode) &&
+                passesEpisodeFilter(path.split("/").pop(), season, episode, false) &&
                 !path.toLowerCase().includes("/specials/");
         });
 
@@ -367,19 +394,44 @@ async function searchTvEpisodes(server, query, season, episode, targetTitle, yea
             return epMatches.map(item => makeStream(item, server.url));
         }
 
-        const fallbackMatches = await h5aiSearch(server, `E0*${episode}(?![0-9])`, folderHref);
+        // For anime sequels (e.g. Bleach TYBW in TMDB Season 2, but folders label as Season 17 or Season 1)
+        if (isAnimeServer && (season === 2 || season === 17)) {
+            const tybwPatterns = [`S17E0*${epPad}(?![0-9])`, `S01E0*${epPad}(?![0-9])`, `E0*${epPad}(?![0-9])`];
+            for (const pat of tybwPatterns) {
+                const tybwMatches = await h5aiSearch(server, pat, folderHref);
+                const tybwFiles = tybwMatches.filter(item => {
+                    const path = decodeURIComponent(item.href);
+                    const fn = path.split("/").pop();
+                    const isTybw = /thousand|tybw/i.test(path);
+                    return /\.(mkv|mp4|avi)$/i.test(path) &&
+                        isTybw &&
+                        passesEpisodeFilter(fn, season, episode, true) &&
+                        !path.toLowerCase().includes("/specials/");
+                });
+                if (tybwFiles.length > 0) {
+                    return tybwFiles.map(item => makeStream(item, server.url));
+                }
+            }
+        }
+
+        // Fallback: search absolute episode number E<ep>
+        const fallbackMatches = await h5aiSearch(server, `E0*${epPad}(?![0-9])`, folderHref);
         return fallbackMatches
             .filter(item => {
                 const path = decodeURIComponent(item.href);
+                const fn = path.split("/").pop();
+                if (isAnimeServer && season === 1 && /thousand|tybw/i.test(fn)) return false;
                 return /\.(mkv|mp4|avi)$/i.test(path) &&
-                    passesEpisodeFilter(path.split("/").pop(), season, episode) &&
+                    passesEpisodeFilter(fn, season, episode, isAnimeServer) &&
                     !path.toLowerCase().includes("/specials/");
             })
             .map(item => makeStream(item, server.url));
     });
 
     const nestedStreams = await Promise.all(subSearches);
-    return nestedStreams.flat();
+    const combined = foldersToRecurse.length > 0 ? nestedStreams.flat() : fileResults;
+    const seenHrefs = new Set();
+    return combined.filter(s => !seenHrefs.has(s.url) && seenHrefs.add(s.url));
 }
 
 async function searchMovies(server, query, targetTitle, year) {
