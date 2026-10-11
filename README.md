@@ -36,12 +36,16 @@ A high-speed scraper plugin for Nuvio to stream Movies, TV Series, Anime, and Ca
 4. Click **Refresh** anytime to receive updates pushed to `main`.
 
 ### Method 2: Local Network / Dev Server
-1. Serve the plugin directory over HTTP:
-   ```powershell
-   npx serve e:\Github\dhakaflix-plugin -p 8080
+1. Navigate to the repository directory in your terminal and serve it over HTTP:
+   ```bash
+   npx serve . -p 8080
+   # or with Python:
+   python -m http.server 8080
    ```
 2. Open Nuvio $\rightarrow$ **Settings** $\rightarrow$ **Plugins** $\rightarrow$ **Add Repository**.
-3. Paste: `http://localhost:8080/manifest.json`
+3. Paste the URL:
+   - **Same device**: `http://localhost:8080/manifest.json`
+   - **Local network (TV / Mobile / other devices)**: `http://<local-ip>:8080/manifest.json` (e.g., `http://192.168.1.100:8080/manifest.json`)
 
 ## Requirements
 - **BDIX Connection**: DhakaFlix servers reside on internal BDIX routing (`172.16.50.x`). Users must be connected through an ISP with active BDIX peering in Bangladesh to stream files.
