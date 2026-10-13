@@ -419,31 +419,53 @@ function extractAudioDetails(filename, href) {
 }
 
 function formatCleanTitle(filename) {
-    const raw = decodeURIComponent(filename).replace(/\.(mkv|mp4|avi)$/i, "");
-    let clean = raw.replace(/(?<=[a-zA-Z])\.(?=[a-zA-Z0-9])|(?<=[0-9])\.(?=[a-zA-Z])|_/g, " ");
-    clean = clean.replace(/\s+/g, " ").trim();
+    let raw = decodeURIComponent(filename).replace(/\.(mkv|mp4|avi|webm|ts|m4v)$/i, "");
 
-    // 1. TV Series / Anime: SxxEyy, Exx, Episode xx
-    const tvMatch = clean.match(/^(.*?)(?:\s*[-–]\s*|\s+)(S\d+[\s.-]*E\d+|\bE\d+\b|\bEpisode\s*\d+\b)/i);
+    // 1. Remove bracketed release group / uploader tags and metadata brackets [Toonworld4all], [Multi Audio], [1080p], etc.
+    raw = raw.replace(/\[[^\]]+\]/g, " ");
+
+    // 2. Normalize dots and underscores to spaces, preserving decimal numbers (e.g. 1.11, 2.0)
+    let clean = raw.replace(/(?<!\d)\.|\.(?!\d)|_/g, " ").replace(/\s+/g, " ").trim();
+
+    // 3. TV Series / Anime: SxxExx, SxEE, Exx, Episode xx
+    let tvMatch = clean.match(/^(.*?)(?:\s*[-–]\s*|\s+)(S\d+[\s.-]*E\d+|\b\d{1,2}x\d+\b|\bE\d+\b|\bEpisode\s*\d+\b)/i);
+
+    // 4. Anime standalone episode numbers: 'Title - 01', 'Title - 123', or 'Title 001 1080p'
+    if (!tvMatch) {
+        let animeMatch = clean.match(/^(.*?)\s*[-–]\s*(\d{1,4})(?:\b|\s+|$)/i);
+        if (!animeMatch) {
+            animeMatch = clean.match(/^(.*?)\s+(0\d{1,3}|\d{1,3})(?=\s+(?:2160p|1440p|1080p|720p|480p|web|bluray|bdrip|webrip|hdtv|x264|x265|hevc|10bit|multi|dual)|$)/i);
+        }
+        if (animeMatch) {
+            const num = animeMatch[2];
+            const parsed = parseInt(num, 10);
+            const epFormatted = "E" + (parsed < 100 ? String(parsed).padStart(2, "0") : String(parsed));
+            tvMatch = [animeMatch[0], animeMatch[1], epFormatted];
+        }
+    }
+
     if (tvMatch) {
-        const title = tvMatch[1].replace(/[-–.\s()]+$/, "").trim();
+        let title = tvMatch[1].replace(/[-–.:\s]+$/, "").trim();
+        title = title.replace(/\s*\(\s*\)$/, "").replace(/\s*\($/, "").trim();
         let ep = tvMatch[2].replace(/\s+/g, " ").trim();
         if (/^s\d+[\s.-]*e\d+$/i.test(ep)) ep = ep.toUpperCase().replace(/[\s.-]+/g, "");
         else if (/^e\d+$/i.test(ep)) ep = ep.toUpperCase();
         return title + " • " + ep;
     }
 
-    // 2. Movies: 4-digit release year
+    // 5. Movies: 4-digit release year
     const movieMatch = clean.match(/^(.*?)(?:\s*\(?((?:19\d{2}|20[0-2]\d))\)?)/i);
     if (movieMatch) {
-        const title = movieMatch[1].replace(/[-–.\s()]+$/, "").trim();
+        let title = movieMatch[1].replace(/[-–.:\s]+$/, "").trim();
+        title = title.replace(/\s*\(\s*\)$/, "").replace(/\s*\($/, "").trim();
         const year = movieMatch[2];
         return title + " • " + year;
     }
 
-    // 3. Fallback: cut before quality tags
+    // 6. Fallback: cut before quality tags
     const parts = clean.split(/\b(?:2160p|1440p|1080p|720p|480p|web-?dl|bluray|bdrip|webrip|hdtv|x264|x265|hevc|10bit)\b/i);
-    const fallback = parts[0].replace(/[-–.\s()]+$/, "").trim();
+    let fallback = parts[0].replace(/[-–.:\s]+$/, "").trim();
+    fallback = fallback.replace(/\s*\(\s*\)$/, "").replace(/\s*\($/, "").trim();
     return fallback || clean;
 }
 
