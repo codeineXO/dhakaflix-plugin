@@ -128,6 +128,24 @@ function runUnitTests() {
         const ok = passesEpisodeFilter("/Show/[Judas] Show - 25 [1080p].mkv", 1, 25, true, "Show");
         assert.strictEqual(ok, true, "Absolute episode 25 should match");
     });
+
+    // 4. Android TV / QuickJS compatibility test (missing setTimeout / clearTimeout)
+    check("QuickJS compatibility: functions without throwing when setTimeout/clearTimeout are missing", () => {
+        const fs = require("fs");
+        const code = fs.readFileSync(require.resolve("../dhakaflix.js"), "utf8");
+        // Eval in isolated function with shadowed timers
+        let caughtError = null;
+        try {
+            eval(`(function() {
+                var setTimeout = undefined;
+                var clearTimeout = undefined;
+                ${code}
+            })()`);
+        } catch (e) {
+            caughtError = e;
+        }
+        assert.strictEqual(caughtError, null, "dhakaflix.js must load and initialize without ReferenceError in QuickJS environment");
+    });
 }
 
 // -------------------------------------------------------------

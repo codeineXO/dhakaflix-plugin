@@ -89,15 +89,26 @@ function resolveAnthologySeason(titleList, requestedSeason, year) {
     return requestedSeason;
 }
 
+function sleep(ms) {
+    if (typeof setTimeout === "function") {
+        return new Promise(r => setTimeout(r, ms));
+    }
+    return Promise.resolve();
+}
+
 function createTimeoutSignal(ms) {
-    if (typeof AbortController !== "undefined") {
+    if (typeof AbortController !== "undefined" && typeof setTimeout === "function") {
         const controller = new AbortController();
         const timer = setTimeout(() => {
             try { controller.abort(); } catch {}
         }, ms);
         return {
             signal: controller.signal,
-            cleanup: () => clearTimeout(timer),
+            cleanup: () => {
+                if (typeof clearTimeout === "function") {
+                    try { clearTimeout(timer); } catch {}
+                }
+            },
         };
     }
     return { signal: undefined, cleanup: () => {} };
@@ -136,7 +147,7 @@ async function httpGet(url, retries = 2) {
         } catch {
             cleanup();
             if (i < retries) {
-                await new Promise(r => setTimeout(r, 300));
+                await sleep(300);
             }
         }
     }
@@ -158,7 +169,7 @@ async function httpPost(url, body, retries = 1, timeoutMs = 4000) {
         } catch {
             cleanup();
             if (i < retries) {
-                await new Promise(r => setTimeout(r, 200));
+                await sleep(200);
             }
         }
     }
@@ -187,7 +198,11 @@ async function getTmdbMeta(tmdbId, mediaType) {
         return tmdbCache.get(cacheKey);
     }
 
-    const apiKey = (typeof TMDB_API_KEY !== "undefined" && TMDB_API_KEY) ? TMDB_API_KEY : "01926d2187b6a5d861eefc750e9df3e3";
+    const apiKey = (typeof TMDB_API_KEY !== "undefined" && TMDB_API_KEY)
+        ? TMDB_API_KEY
+        : (typeof globalThis !== "undefined" && globalThis.TMDB_API_KEY)
+            ? globalThis.TMDB_API_KEY
+            : "01926d2187b6a5d861eefc750e9df3e3";
     if (!apiKey) return null;
 
     let targetId = rawId;
