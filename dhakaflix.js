@@ -73,7 +73,7 @@ async function getTmdbMeta(tmdbId, mediaType) {
     if (!apiKey) return null;
 
     const endpoint = mediaType === "tv" ? "tv" : "movie";
-    const data = await httpGet(`${TMDB_API}/${endpoint}/${tmdbId}?api_key=${apiKey}`);
+    const data = await httpGet(`${TMDB_API}/${endpoint}/${tmdbId}?api_key=${apiKey}&append_to_response=alternative_titles`);
     if (!data) return null;
 
     const title = data.name || data.title || "";
@@ -82,7 +82,51 @@ async function getTmdbMeta(tmdbId, mediaType) {
     const year = releaseDate ? releaseDate.slice(0, 4) : "";
     const isAnimation = Array.isArray(data.genres) && data.genres.some(g => g.id === 16);
 
-    const meta = { title, origTitle, year, isAnimation };
+    const rawAlts = data.alternative_titles?.titles || data.alternative_titles?.results || [];
+    const preferredRegions = new Set(["US", "GB", "CA", "AU", "JP", "KR", "IN", "BD"]);
+    const primaryClean = cleanTitle(title).toLowerCase();
+    const primaryTokens = extractSequelTokens(title);
+    const hasSeasonOrArc = /\b(?:season|part|ova|oad|special|specials|movie|film)\b/i.test(title);
+    const hasOrdinal = /\b\d+(?:st|nd|rd|th)\b/i.test(title);
+    const primaryHasSub = /\s*[:—]\s*|\s+-\s+/.test(title);
+
+    const aliases = [];
+    const seenClean = new Set();
+    if (primaryClean) seenClean.add(primaryClean);
+    const origClean = cleanTitle(origTitle).toLowerCase();
+    if (origClean) seenClean.add(origClean);
+
+    for (const item of rawAlts) {
+        let alt = (item.title || "").trim();
+        if (!alt) continue;
+
+        if (item.iso_3166_1 && !preferredRegions.has(item.iso_3166_1)) continue;
+
+        // Strip combining marks/diacritics (e.g. Sōsō -> Soso, Bāhubali -> Bahubali)
+        const normalized = alt.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        if (/[^\x20-\x7E\u2019]/.test(normalized)) continue;
+
+        if (extractSequelTokens(alt) !== primaryTokens) continue;
+
+        if (!hasOrdinal && /\b\d+(?:st|nd|rd|th)\b/i.test(alt)) continue;
+
+        if (!hasSeasonOrArc && /\b(?:season|part|ova|oad|special|specials|movie|film)\b/i.test(alt)) {
+            continue;
+        }
+
+        if (!primaryHasSub && /\s*[:—]\s*|\s+-\s+/.test(alt)) {
+            alt = alt.split(/\s*[:—]\s*|\s+-\s+/)[0].trim();
+        }
+
+        const altClean = cleanTitle(alt).toLowerCase();
+        if (altClean.length < 2 || seenClean.has(altClean)) continue;
+
+        seenClean.add(altClean);
+        aliases.push(alt);
+        if (aliases.length >= 5) break;
+    }
+
+    const meta = { title, origTitle, year, isAnimation, aliases };
     cacheSet(tmdbCache, cacheKey, meta);
     return meta;
 }
@@ -328,11 +372,14 @@ function cleanFilenameForEp(fn, targetTitle) {
     let s = fn.replace(/\.(mkv|mp4|avi|webm|ts|m4v)$/i, "");
     s = s.replace(/\[[^\]]+\]/g, " ");
     if (targetTitle) {
-        const titleNums = targetTitle.match(/\d+/g);
-        if (titleNums) {
-            titleNums.forEach(n => {
-                s = s.replace(new RegExp(`(?<![0-9])${n}(?![0-9])`, "g"), " ");
-            });
+        const titles = Array.isArray(targetTitle) ? targetTitle : [targetTitle];
+        for (const t of titles) {
+            const titleNums = t ? String(t).match(/\d+/g) : null;
+            if (titleNums) {
+                titleNums.forEach(n => {
+                    s = s.replace(new RegExp(`(?<![0-9])${n}(?![0-9])`, "g"), " ");
+                });
+            }
         }
     }
     s = s.replace(/\b(?:2160p|1080p|720p|480p|576p|360p|4k|2k|uhd|fhd|hd)\b/gi, " ");
@@ -567,8 +614,9 @@ async function searchInsideTvFolders(server, foldersToRecurse, season, episode, 
     const sPad = String(season).padStart(2, "0");
     const epPad = String(episode);
     const isAnimeServer = (server.id === "df10");
-    const isBleach = /bleach/i.test(targetTitle);
-    const isTybw = isAnimeServer && (/thousand|tybw/i.test(targetTitle) || (isBleach && (season === 2 || season === 17)));
+    const titleList = Array.isArray(targetTitle) ? targetTitle : [targetTitle];
+    const isBleach = titleList.some(t => /bleach/i.test(t));
+    const isTybw = isAnimeServer && (titleList.some(t => /thousand|tybw/i.test(t)) || (isBleach && (season === 2 || season === 17)));
 
     const subSearches = foldersToRecurse.map(async (folderHref) => {
         const isTybwFolder = /thousand|tybw/i.test(folderHref);
@@ -655,6 +703,7 @@ async function searchTvEpisodes(server, query, season, episode, targetTitle, yea
 
     const fileResults = [];
     const foldersToRecurse = [];
+    const titleList = Array.isArray(targetTitle) ? targetTitle : [targetTitle];
 
     for (const item of rootMatches) {
         const decodedHref = decodeURIComponent(item.href);
@@ -665,13 +714,13 @@ async function searchTvEpisodes(server, query, season, episode, targetTitle, yea
 
         if (isVideo) {
             const filename = decodedHref.split("/").pop();
-            if (matchesTvFolder(decodedHref, targetTitle, year, server.id) &&
-                passesEpisodeFilter(decodedHref, season, episode, false, targetTitle) &&
+            if (titleList.some(t => matchesTvFolder(decodedHref, t, year, server.id)) &&
+                passesEpisodeFilter(decodedHref, season, episode, false, titleList) &&
                 !decodedHref.toLowerCase().includes("/specials/")) {
                 fileResults.push(makeStream(item, server.url));
             }
         } else if (item.href.endsWith("/")) {
-            if (matchesTvFolder(decodedHref, targetTitle, year, server.id)) {
+            if (titleList.some(t => matchesTvFolder(decodedHref, t, year, server.id))) {
                 foldersToRecurse.push(item.href);
             }
         }
@@ -682,7 +731,7 @@ async function searchTvEpisodes(server, query, season, episode, targetTitle, yea
         return { streams: fileResults, folders: [] };
     }
 
-    const nestedStreams = await searchInsideTvFolders(server, foldersToRecurse, season, episode, targetTitle);
+    const nestedStreams = await searchInsideTvFolders(server, foldersToRecurse, season, episode, titleList);
     const combined = foldersToRecurse.length > 0 ? nestedStreams : fileResults;
     const seenHrefs = new Set();
     const uniqueStreams = combined.filter(s => !seenHrefs.has(s.url) && seenHrefs.add(s.url));
@@ -696,6 +745,7 @@ async function searchMovies(server, query, targetTitle, year) {
     const streams = [];
     const seenHrefs = new Set();
     const foldersToInspect = [];
+    const titleList = Array.isArray(targetTitle) ? targetTitle : [targetTitle];
 
     for (const item of matches) {
         const decoded = decodeURIComponent(item.href);
@@ -706,12 +756,12 @@ async function searchMovies(server, query, targetTitle, year) {
         if (lowerPath.includes("sample")) continue;
 
         if (isVideo) {
-            if (matchesMovieTitle(item.href, targetTitle) && matchesMovieYear(lowerPath, year)) {
+            if (titleList.some(t => matchesMovieTitle(item.href, t)) && matchesMovieYear(lowerPath, year)) {
                 seenHrefs.add(item.href);
                 streams.push(makeStream(item, server.url));
             }
         } else if (item.href.endsWith("/")) {
-            if (matchesMovieTitle(item.href, targetTitle) && matchesMovieYear(lowerPath, year)) {
+            if (titleList.some(t => matchesMovieTitle(item.href, t)) && matchesMovieYear(lowerPath, year)) {
                 foldersToInspect.push(item.href);
             }
         }
@@ -749,13 +799,25 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         const meta = await getTmdbMeta(tmdbId, mediaType);
         if (!meta || !meta.title) return [];
 
+        const candidateTitles = [meta.title];
+        if (meta.origTitle && meta.origTitle !== meta.title) {
+            candidateTitles.push(meta.origTitle);
+        }
+        if (Array.isArray(meta.aliases)) {
+            for (const alt of meta.aliases) {
+                if (!candidateTitles.includes(alt)) {
+                    candidateTitles.push(alt);
+                }
+            }
+        }
+
         // Fast-path: check TV folder cache for already discovered show folders (instant warm search)
         if (mediaType === "tv" && tvFolderCache.has(String(tmdbId))) {
             const cachedServerEntries = tvFolderCache.get(String(tmdbId));
             const subTasks = cachedServerEntries.map(async entry => {
                 const s = SERVERS.find(srv => srv.id === entry.serverId);
                 if (!s) return [];
-                return searchInsideTvFolders(s, entry.folders, season, episode, meta.title);
+                return searchInsideTvFolders(s, entry.folders, season, episode, candidateTitles);
             });
             const subResults = (await Promise.all(subTasks)).flat();
             if (subResults.length > 0) {
@@ -772,9 +834,8 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         }
 
         const queriesToTry = new Set();
-        for (const q of buildSearchQueries(meta.title)) queriesToTry.add(q);
-        if (meta.origTitle && meta.origTitle !== meta.title) {
-            for (const q of buildSearchQueries(meta.origTitle)) queriesToTry.add(q);
+        for (const t of candidateTitles) {
+            for (const q of buildSearchQueries(t)) queriesToTry.add(q);
         }
 
         let targetServers;
@@ -798,13 +859,13 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 
             const tasks = targetServers.map(async server => {
                 if (mediaType === "tv") {
-                    const res = await searchTvEpisodes(server, query, season, episode, meta.title, meta.year);
+                    const res = await searchTvEpisodes(server, query, season, episode, candidateTitles, meta.year);
                     if (res.folders && res.folders.length > 0) {
                         discoveredFolders.push({ serverId: server.id, folders: res.folders });
                     }
                     return res.streams;
                 } else {
-                    return searchMovies(server, query, meta.title, meta.year);
+                    return searchMovies(server, query, candidateTitles, meta.year);
                 }
             });
 
@@ -828,7 +889,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
                 if (!query) continue;
 
                 const tasks = fallbackServers.map(async server => {
-                    const res = await searchTvEpisodes(server, query, season, episode, meta.title, meta.year);
+                    const res = await searchTvEpisodes(server, query, season, episode, candidateTitles, meta.year);
                     if (res.folders && res.folders.length > 0) {
                         discoveredFolders.push({ serverId: server.id, folders: res.folders });
                     }
