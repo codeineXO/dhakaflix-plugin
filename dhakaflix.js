@@ -456,6 +456,7 @@ function makeStream(item, serverUrl) {
     return {
         name: sortTag + topLine,
         title: filename,
+        quality: qualityLabel,
         size: belowLines,
         url: fullUrl,
         headers: { "User-Agent": HEADERS["User-Agent"] },
