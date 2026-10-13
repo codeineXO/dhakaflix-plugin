@@ -38,14 +38,14 @@ const ANTHOLOGY_MAP = [
         arcPattern: "DAHMER",
     },
     {
-        pattern: /menendez|lyle.*erik/i,
+        pattern: /menendez|lyle.*eri[ck]/i,
         franchiseTitle: "Monster",
         franchiseYear: "2022",
         diskSeason: 2,
         arcPattern: "Menendez",
     },
     {
-        pattern: /ed\s*gein/i,
+        pattern: /ed\s*g[ea]in|gein/i,
         franchiseTitle: "Monster",
         franchiseYear: "2022",
         diskSeason: 3,
@@ -108,7 +108,11 @@ function cacheSet(map, key, val, max = 100) {
 }
 
 async function getTmdbMeta(tmdbId, mediaType) {
-    const cacheKey = `${mediaType}:${tmdbId}`;
+    const normType = (mediaType === "series" || mediaType === "tv") ? "tv" : "movie";
+    let rawId = String(tmdbId || "").trim().replace(/^(?:series|movie|tv):/i, "").replace(/^tmdb:/i, "");
+    if (rawId.includes(":")) rawId = rawId.split(":")[0];
+
+    const cacheKey = `${normType}:${rawId}`;
     if (tmdbCache.has(cacheKey)) {
         return tmdbCache.get(cacheKey);
     }
@@ -116,22 +120,22 @@ async function getTmdbMeta(tmdbId, mediaType) {
     const apiKey = (typeof TMDB_API_KEY !== "undefined" && TMDB_API_KEY) ? TMDB_API_KEY : "01926d2187b6a5d861eefc750e9df3e3";
     if (!apiKey) return null;
 
-    let targetId = tmdbId;
-    let targetType = mediaType;
+    let targetId = rawId;
+    let targetType = normType;
     let cinemetaFallback = null;
 
     // Handle IMDb ID (e.g. "tt13207736")
-    if (typeof tmdbId === "string" && tmdbId.startsWith("tt")) {
-        const findData = await httpGet(`${TMDB_API}/find/${tmdbId}?api_key=${apiKey}&external_source=imdb_id`);
-        const found = (mediaType === "tv" ? findData?.tv_results?.[0] : findData?.movie_results?.[0]) ||
+    if (typeof rawId === "string" && rawId.startsWith("tt")) {
+        const findData = await httpGet(`${TMDB_API}/find/${rawId}?api_key=${apiKey}&external_source=imdb_id`);
+        const found = (normType === "tv" ? findData?.tv_results?.[0] : findData?.movie_results?.[0]) ||
                       findData?.tv_results?.[0] || findData?.movie_results?.[0];
         if (found?.id) {
             targetId = found.id;
             targetType = found.name ? "tv" : "movie";
         } else {
             // Fallback to Cinemeta if TMDB /find returned no link
-            const cmType = mediaType === "tv" ? "series" : "movie";
-            const cmData = await httpGet(`https://v3-cinemeta.strem.io/meta/${cmType}/${tmdbId}.json`);
+            const cmType = normType === "tv" ? "series" : "movie";
+            const cmData = await httpGet(`https://v3-cinemeta.strem.io/meta/${cmType}/${rawId}.json`);
             if (cmData?.meta?.name) {
                 cinemetaFallback = {
                     title: cmData.meta.name,
@@ -494,8 +498,7 @@ function matchesTvFolder(path, targetTitle, targetYear, serverId) {
     if (!arcMatch && Array.isArray(info.segmentTitles)) {
         arcMatch = info.segmentTitles.some(seg =>
             seg === cleanedTarget ||
-            normalizePlural(seg) === normalizePlural(cleanedTarget) ||
-            (cleanedTarget.length > 5 && seg.includes(cleanedTarget))
+            normalizePlural(seg) === normalizePlural(cleanedTarget)
         );
     }
 
@@ -842,19 +845,17 @@ async function searchInsideTvFolders(server, foldersToRecurse, season, episode, 
             return [];
         }
 
-        // Standard Season patterns (try effective anthology season first if different from requested season)
-        const seasonPatterns = [`S${sPad}E0*${epPad}(?![0-9])`];
-        if (effectiveSeason !== season) {
-            seasonPatterns.unshift(`S${effSPad}E0*${epPad}(?![0-9])`);
-        }
+        // Standard Season patterns (use mapped effective season if from an anthology)
+        const targetSeason = effectiveSeason;
+        const targetSPad = String(targetSeason).padStart(2, "0");
+        const seasonPatterns = [`S${targetSPad}E0*${epPad}(?![0-9])`];
 
         for (const epPattern of seasonPatterns) {
             const nestedMatches = await h5aiSearch(server, epPattern, folderHref);
             const epMatches = nestedMatches.filter(item => {
                 const path = safeDecodeURIComponent(item.href);
                 return /\.(mkv|mp4|avi)$/i.test(path) &&
-                    (passesEpisodeFilter(path, season, episode, false, targetTitle) ||
-                     passesEpisodeFilter(path, effectiveSeason, episode, false, targetTitle)) &&
+                    passesEpisodeFilter(path, targetSeason, episode, false, targetTitle) &&
                     !path.toLowerCase().includes("/specials/") &&
                     !(isAnimeServer && /thousand|tybw/i.test(path));
             });
@@ -868,12 +869,11 @@ async function searchInsideTvFolders(server, foldersToRecurse, season, episode, 
         const epNumPattern = `(?<![0-9])0*${epPad}(?![0-9])`;
         const numMatches = await h5aiSearch(server, epNumPattern, folderHref);
 
-        // Tier 1: Strict Season Match (pathSeason === requestedSeason or effectiveSeason)
+        // Tier 1: Strict Season Match (pathSeason === targetSeason)
         const strictMatches = numMatches.filter(item => {
             const path = safeDecodeURIComponent(item.href);
             return /\.(mkv|mp4|avi)$/i.test(path) &&
-                (passesEpisodeFilter(path, season, episode, false, targetTitle) ||
-                 passesEpisodeFilter(path, effectiveSeason, episode, false, targetTitle)) &&
+                passesEpisodeFilter(path, targetSeason, episode, false, targetTitle) &&
                 !path.toLowerCase().includes("/specials/") &&
                 !(isAnimeServer && /thousand|tybw/i.test(path));
         });
@@ -920,8 +920,7 @@ async function searchTvEpisodes(server, query, season, episode, targetTitle, yea
         if (isVideo) {
             const filename = decodedHref.split("/").pop();
             if (titleList.some(t => matchesTvFolder(decodedHref, t, year, server.id)) &&
-                (passesEpisodeFilter(decodedHref, season, episode, false, titleList) ||
-                 passesEpisodeFilter(decodedHref, effectiveSeason, episode, false, titleList)) &&
+                passesEpisodeFilter(decodedHref, effectiveSeason, episode, false, titleList) &&
                 !decodedHref.toLowerCase().includes("/specials/")) {
                 fileResults.push(makeStream(item, server.url));
             }
@@ -1005,14 +1004,27 @@ async function searchMovies(server, query, targetTitle, year, isAnimation) {
 
 async function getStreams(tmdbId, mediaType, season, episode) {
     try {
-        if (mediaType === "tv" && (season == null || episode == null)) return [];
+        const normType = (mediaType === "series" || mediaType === "tv") ? "tv" : "movie";
+        let rawId = String(tmdbId || "").trim().replace(/^(?:series|movie|tv):/i, "").replace(/^tmdb:/i, "");
+        let cleanId = rawId;
+        let reqSeason = season != null ? parseInt(season, 10) : null;
+        let reqEpisode = episode != null ? parseInt(episode, 10) : null;
 
-        const streamCacheKey = `${mediaType}:${tmdbId}:${season ?? 0}:${episode ?? 0}`;
+        if (rawId.includes(":")) {
+            const parts = rawId.split(":");
+            cleanId = parts[0];
+            if (reqSeason == null && parts[1]) reqSeason = parseInt(parts[1], 10);
+            if (reqEpisode == null && parts[2]) reqEpisode = parseInt(parts[2], 10);
+        }
+
+        if (normType === "tv" && (reqSeason == null || reqEpisode == null)) return [];
+
+        const streamCacheKey = `${normType}:${cleanId}:${reqSeason ?? 0}:${reqEpisode ?? 0}`;
         if (streamCache.has(streamCacheKey)) {
             return streamCache.get(streamCacheKey);
         }
 
-        const meta = await getTmdbMeta(tmdbId, mediaType);
+        const meta = await getTmdbMeta(cleanId, normType);
         if (!meta || !meta.title) return [];
 
         const candidateTitles = [meta.title];
@@ -1028,12 +1040,12 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         }
 
         // Fast-path: check TV folder cache for already discovered show folders (instant warm search)
-        if (mediaType === "tv" && tvFolderCache.has(String(tmdbId))) {
-            const cachedServerEntries = tvFolderCache.get(String(tmdbId));
+        if (normType === "tv" && tvFolderCache.has(String(cleanId))) {
+            const cachedServerEntries = tvFolderCache.get(String(cleanId));
             const subTasks = cachedServerEntries.map(async entry => {
                 const s = SERVERS.find(srv => srv.id === entry.serverId);
                 if (!s) return [];
-                return searchInsideTvFolders(s, entry.folders, season, episode, candidateTitles);
+                return searchInsideTvFolders(s, entry.folders, reqSeason, reqEpisode, candidateTitles);
             });
             const subResults = (await Promise.all(subTasks)).flat();
             if (subResults.length > 0) {
@@ -1055,7 +1067,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         }
 
         let targetServers;
-        if (mediaType === "tv") {
+        if (normType === "tv") {
             if (meta.isAnimation) {
                 // Primary anime server (df10 hosts 99.9% of anime and cartoons)
                 targetServers = [SERVERS.find(s => s.id === "df10")].filter(Boolean);
@@ -1063,7 +1075,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
                 targetServers = SERVERS.filter(s => s.types.includes("tv") && s.id !== "df10");
             }
         } else {
-            targetServers = SERVERS.filter(s => s.types.includes(mediaType));
+            targetServers = SERVERS.filter(s => s.types.includes(normType));
         }
 
         const allStreams = [];
@@ -1075,8 +1087,8 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 
             const tasks = targetServers.map(async server => {
                 try {
-                    if (mediaType === "tv") {
-                        const res = await searchTvEpisodes(server, query, season, episode, candidateTitles, meta.year);
+                    if (normType === "tv") {
+                        const res = await searchTvEpisodes(server, query, reqSeason, reqEpisode, candidateTitles, meta.year);
                         if (res.folders && res.folders.length > 0) {
                             discoveredFolders.push({ serverId: server.id, folders: res.folders });
                         }
@@ -1103,13 +1115,13 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         }
 
         // Fallback for animation if df10 didn't have it (e.g. western cartoons on df12/df14)
-        if (mediaType === "tv" && meta.isAnimation && allStreams.length === 0) {
+        if (normType === "tv" && meta.isAnimation && allStreams.length === 0) {
             const fallbackServers = SERVERS.filter(s => s.types.includes("tv") && s.id !== "df10");
             for (const query of queriesToTry) {
                 if (!query) continue;
 
                 const tasks = fallbackServers.map(async server => {
-                    const res = await searchTvEpisodes(server, query, season, episode, candidateTitles, meta.year);
+                    const res = await searchTvEpisodes(server, query, reqSeason, reqEpisode, candidateTitles, meta.year);
                     if (res.folders && res.folders.length > 0) {
                         discoveredFolders.push({ serverId: server.id, folders: res.folders });
                     }
@@ -1131,7 +1143,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         }
 
         if (discoveredFolders.length > 0) {
-            cacheSet(tvFolderCache, String(tmdbId), discoveredFolders);
+            cacheSet(tvFolderCache, String(cleanId), discoveredFolders);
         }
 
         // Sort descending: highest resolution first, then largest file size
