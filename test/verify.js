@@ -138,6 +138,7 @@ const BENCHMARK_TITLES = [
     {
         name: "Money Heist (S01E01)",
         type: "tv",
+        server: "df12",
         tmdbId: 71446,
         season: 1,
         episode: 1,
@@ -147,6 +148,7 @@ const BENCHMARK_TITLES = [
     {
         name: "WandaVision (S01E01)",
         type: "tv",
+        server: "df12",
         tmdbId: 85271,
         season: 1,
         episode: 1,
@@ -156,6 +158,7 @@ const BENCHMARK_TITLES = [
     {
         name: "Breaking Bad (S01E01)",
         type: "tv",
+        server: "df12",
         tmdbId: 1396,
         season: 1,
         episode: 1,
@@ -165,6 +168,7 @@ const BENCHMARK_TITLES = [
     {
         name: "Monsters: Menendez Story (S01E01)",
         type: "tv",
+        server: "df12",
         tmdbId: 225634,
         season: 1,
         episode: 1,
@@ -174,6 +178,7 @@ const BENCHMARK_TITLES = [
     {
         name: "Dark Desire (S01E01)",
         type: "tv",
+        server: "df12",
         tmdbId: 105214,
         season: 1,
         episode: 1,
@@ -258,6 +263,7 @@ const BENCHMARK_TITLES = [
     {
         name: "Game of Thrones (S01E01)",
         type: "tv",
+        server: "df12",
         tmdbId: 1399,
         season: 1,
         episode: 1,
@@ -267,6 +273,7 @@ const BENCHMARK_TITLES = [
     {
         name: "Stranger Things (S01E01)",
         type: "tv",
+        server: "df12",
         tmdbId: 66732,
         season: 1,
         episode: 1,
@@ -295,6 +302,7 @@ const BENCHMARK_TITLES = [
     {
         name: "American Crime Story - S01E01 (O.J. Simpson)",
         type: "tv",
+        server: "df12",
         tmdbId: 64513,
         season: 1,
         episode: 1,
@@ -304,6 +312,7 @@ const BENCHMARK_TITLES = [
     {
         name: "American Crime Story - S02E01 (Versace)",
         type: "tv",
+        server: "df12",
         tmdbId: 64513,
         season: 2,
         episode: 1,
@@ -313,6 +322,7 @@ const BENCHMARK_TITLES = [
     {
         name: "True Detective - S04E01 (Night Country)",
         type: "tv",
+        server: "df12",
         tmdbId: 46648,
         season: 4,
         episode: 1,
@@ -331,6 +341,7 @@ const BENCHMARK_TITLES = [
     {
         name: "Doctor Who 2024 (S01E01 -> S14)",
         type: "tv",
+        server: "df12",
         tmdbId: 239770,
         season: 1,
         episode: 1,
@@ -340,6 +351,7 @@ const BENCHMARK_TITLES = [
     {
         name: "The Office US (S01E01)",
         type: "tv",
+        server: "df12",
         tmdbId: 2316,
         season: 1,
         episode: 1,
@@ -349,6 +361,7 @@ const BENCHMARK_TITLES = [
     {
         name: "The Office UK (S01E01)",
         type: "tv",
+        server: "df12",
         tmdbId: 2996,
         season: 1,
         episode: 1,
@@ -436,7 +449,22 @@ const BENCHMARK_TITLES = [
 async function runLiveBenchmarks() {
     header("STAGE 2: Live Server Benchmark Suite (Querying DhakaFlix BDIX)");
 
+    let df12Online = false;
+    try {
+        const res = await fetch("http://172.16.50.12", { signal: AbortSignal.timeout(2000) });
+        if (res.ok) df12Online = true;
+    } catch {}
+
+    if (!df12Online) {
+        warn("DhakaFlix Server df12 (http://172.16.50.12) is currently offline / hung on BDIX. TV Series hosted exclusively on df12 will be skipped.");
+    }
+
     for (const item of BENCHMARK_TITLES) {
+        if (!df12Online && item.server === "df12") {
+            warn(`${item.name}: Skipped (df12 server currently offline on BDIX)`);
+            continue;
+        }
+
         await checkAsync(`${item.name}`, async () => {
             let streams = item.type === "tv"
                 ? await dhakaflix.getStreams(item.tmdbId, item.type, item.season, item.episode)

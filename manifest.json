@@ -1,8 +1,22 @@
 {
+  "manifestVersion": 1,
   "name": "DhakaFlix BDIX",
   "version": "1.0.4",
   "description": "DhakaFlix BDIX high-speed scraper for Movies, TV Series, Anime & Cartoons",
   "author": "CodeineXO",
+  "providers": [
+    {
+      "id": "dhakaflix",
+      "name": "DhakaFlix",
+      "description": "DhakaFlix FTP / Web Index (Movies, TV Shows, Anime & Cartoons)",
+      "version": "1.0.4",
+      "filename": "dhakaflix.js",
+      "supportedTypes": ["movie", "tv"],
+      "enabled": true,
+      "contentLanguage": ["en", "bn", "hi", "ja"],
+      "formats": ["mp4", "mkv", "avi"]
+    }
+  ],
   "scrapers": [
     {
       "id": "dhakaflix",

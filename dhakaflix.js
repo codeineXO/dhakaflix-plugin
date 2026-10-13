@@ -5,7 +5,8 @@ const SERVERS = [
     { id: "df7", url: "http://172.16.50.7", root: "/DHAKA-FLIX-7/", types: ["movie"] },
     { id: "df10", url: "http://172.16.50.10", root: "/DHAKA-FLIX-10/", types: ["tv"] },
     { id: "df12", url: "http://172.16.50.12", root: "/DHAKA-FLIX-12/", types: ["tv"] },
-    { id: "df14", url: "http://172.16.50.14", root: "/DHAKA-FLIX-14/", types: ["movie", "tv"] },
+    { id: "df14", url: "http://172.16.50.14", root: "/DHAKA-FLIX-14/", types: ["movie"] },
+    { id: "df14_tv", url: "http://172.16.50.14", root: "/DHAKA-FLIX-14/KOREAN TV & WEB Series/", types: ["tv"] },
 ];
 
 const HEADERS = {
@@ -88,15 +89,52 @@ function resolveAnthologySeason(titleList, requestedSeason, year) {
     return requestedSeason;
 }
 
+function createTimeoutSignal(ms) {
+    if (typeof AbortController !== "undefined") {
+        const controller = new AbortController();
+        const timer = setTimeout(() => {
+            try { controller.abort(); } catch {}
+        }, ms);
+        return {
+            signal: controller.signal,
+            cleanup: () => clearTimeout(timer),
+        };
+    }
+    return { signal: undefined, cleanup: () => {} };
+}
+
+const failedServers = new Map();
+
+function isServerHealthy(serverUrl) {
+    const lastFail = failedServers.get(serverUrl);
+    if (!lastFail) return true;
+    if (Date.now() - lastFail > 60000) {
+        failedServers.delete(serverUrl);
+        return true;
+    }
+    return false;
+}
+
+function markServerFailed(serverUrl) {
+    failedServers.set(serverUrl, Date.now());
+}
+
+function markServerSuccess(serverUrl) {
+    failedServers.delete(serverUrl);
+}
+
 async function httpGet(url, retries = 2) {
     for (let i = 0; i <= retries; i++) {
+        const { signal, cleanup } = createTimeoutSignal(5000);
         try {
             const res = await fetch(url, {
                 headers: { "Accept": "application/json" },
-                signal: AbortSignal.timeout(5000),
+                signal,
             });
+            cleanup();
             if (res.ok) return await res.json();
         } catch {
+            cleanup();
             if (i < retries) {
                 await new Promise(r => setTimeout(r, 300));
             }
@@ -105,19 +143,22 @@ async function httpGet(url, retries = 2) {
     return null;
 }
 
-async function httpPost(url, body, retries = 2) {
+async function httpPost(url, body, retries = 1, timeoutMs = 4000) {
     for (let i = 0; i <= retries; i++) {
+        const { signal, cleanup } = createTimeoutSignal(timeoutMs);
         try {
             const res = await fetch(url, {
                 method: "POST",
                 headers: HEADERS,
                 body: JSON.stringify(body),
-                signal: AbortSignal.timeout(25000),
+                signal,
             });
+            cleanup();
             if (res.ok) return await res.json();
         } catch {
+            cleanup();
             if (i < retries) {
-                await new Promise(r => setTimeout(r, 300));
+                await new Promise(r => setTimeout(r, 200));
             }
         }
     }
@@ -138,7 +179,7 @@ function cacheSet(map, key, val, max = 100) {
 
 async function getTmdbMeta(tmdbId, mediaType) {
     const normType = (mediaType === "series" || mediaType === "tv") ? "tv" : "movie";
-    let rawId = String(tmdbId || "").trim().replace(/^(?:series|movie|tv):/i, "").replace(/^tmdb:/i, "");
+    let rawId = String(tmdbId || "").trim().replace(/^(?:series|movie|tv|anime):/i, "").replace(/^tmdb:/i, "");
     if (rawId.includes(":")) rawId = rawId.split(":")[0];
 
     const cacheKey = `${normType}:${rawId}`;
@@ -157,10 +198,11 @@ async function getTmdbMeta(tmdbId, mediaType) {
     let cinemetaExtraTitle = null;
     if (typeof rawId === "string" && rawId.startsWith("tt")) {
         const findData = await httpGet(`${TMDB_API}/find/${rawId}?api_key=${apiKey}&external_source=imdb_id`);
-        const found = normType === "tv" ? findData?.tv_results?.[0] : findData?.movie_results?.[0];
+        const found = (normType === "tv" ? findData?.tv_results?.[0] : findData?.movie_results?.[0]) ||
+                      findData?.tv_results?.[0] || findData?.movie_results?.[0];
         if (found?.id) {
             targetId = found.id;
-            targetType = normType;
+            targetType = (found.first_air_date || normType === "tv") ? "tv" : "movie";
             // Also check Cinemeta in background in case IMDb ID refers to a specific anime sub-arc (e.g. Bakemonogatari)
             try {
                 const cmType = normType === "tv" ? "series" : "movie";
@@ -241,7 +283,7 @@ async function getTmdbMeta(tmdbId, mediaType) {
             if (item.iso_3166_1 && !preferredRegions.has(item.iso_3166_1)) continue;
 
             // Strip combining marks/diacritics (e.g. Sōsō -> Soso, Bāhubali -> Bahubali)
-            const normalized = alt.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+            const normalized = (typeof alt.normalize === "function") ? alt.normalize("NFD").replace(/[\u0300-\u036f]/g, "") : alt;
             if (/[^\x20-\x7E\u2019]/.test(normalized)) continue;
 
             if (extractSequelTokens(alt) !== primaryTokens) continue;
@@ -257,7 +299,7 @@ async function getTmdbMeta(tmdbId, mediaType) {
             }
 
             const altClean = cleanTitle(alt).toLowerCase();
-            if (altClean.length < 2 || seenClean.has(altClean)) continue;
+            if (altClean.length < 3 || seenClean.has(altClean)) continue;
 
             seenClean.add(altClean);
             aliases.push(alt);
@@ -322,8 +364,11 @@ function getSortTag(rank) {
 }
 
 function cleanTitle(str) {
-    return (str || "")
-        .normalize("NFD")
+    let s = str || "";
+    if (typeof s.normalize === "function") {
+        s = s.normalize("NFD");
+    }
+    return s
         .replace(/[\u0300-\u036f]/g, "")
         .replace(/&/g, "and")
         .replace(/[^a-zA-Z0-9 ]/g, " ")
@@ -513,10 +558,13 @@ function extractTvFolderInfo(path) {
         // Check for Season (Arc Name) e.g. Season 2 (Monsters-The Lyle and Erik Menendez Story)
         const seasonArcMatch = p.match(/^Season\s*(\d+)\s*\(([^)]+)\)/i);
         if (seasonArcMatch && !arcInfo) {
-            arcInfo = {
-                season: parseInt(seasonArcMatch[1], 10),
-                arcTitle: cleanTitle(seasonArcMatch[2]).toLowerCase(),
-            };
+            const rawArc = seasonArcMatch[2].trim();
+            if (!/^(?:hindi|english|bengali|bangla|dual|multi|dubbed|subbed|720p|1080p|2160p|4k|remux|bluray|web-?dl)/i.test(rawArc)) {
+                arcInfo = {
+                    season: parseInt(seasonArcMatch[1], 10),
+                    arcTitle: cleanTitle(rawArc).toLowerCase(),
+                };
+            }
         }
 
         // Broad year pattern matching TV Series, TV Cartoons, TV Mini-Series, TV Talk-Show, Reality, (2020), etc.
@@ -574,8 +622,7 @@ function matchesTvFolder(path, targetTitle, targetYear, serverId, isAnimation) {
     if (info.arcTitle) {
         if (info.arcTitle === cleanedTarget ||
             normalizePlural(info.arcTitle) === normalizePlural(cleanedTarget) ||
-            (cleanedTarget.length > 5 && info.arcTitle.includes(cleanedTarget)) ||
-            (info.arcTitle.length > 10 && info.arcTitle.includes(cleanedTarget))) {
+            (cleanedTarget.length >= 4 && new RegExp(`(?:^|[^a-zA-Z0-9])${cleanedTarget}(?:[^a-zA-Z0-9]|$)`, "i").test(info.arcTitle))) {
             arcMatch = true;
         }
     }
@@ -682,7 +729,7 @@ function cleanFilenameForEp(fn, targetTitle) {
             const titleNums = t ? String(t).match(/\d+/g) : null;
             if (titleNums) {
                 titleNums.forEach(n => {
-                    s = s.replace(new RegExp(`(?<![0-9])${n}(?![0-9])`, "g"), " ");
+                    s = s.replace(new RegExp(`(^|[^0-9])${n}(?![0-9])`, "g"), "$1 ");
                 });
             }
         }
@@ -760,7 +807,7 @@ function passesEpisodeFilter(pathOrFilename, season, episode, allowAbsolute, tar
         /\bS\d{1,2}[._ -]?E\d+/i.test(filename);
     if (!hasExplicitOtherEp) {
         const cleaned = cleanFilenameForEp(filename, targetTitle);
-        const pStandalone = new RegExp(`(?<![0-9])0*${ep}(?![0-9])`);
+        const pStandalone = new RegExp(`(?:^|[^0-9])0*${ep}(?![0-9])`);
         if (pStandalone.test(cleaned)) {
             return true;
         }
@@ -817,7 +864,13 @@ function formatCleanTitle(filename) {
     raw = raw.replace(/\[[^\]]+\]/g, " ");
 
     // 2. Normalize dots and underscores to spaces, preserving decimal numbers (e.g. 1.11, 2.0)
-    let clean = raw.replace(/(?<!\d)\.|\.(?!\d)|_/g, " ").replace(/\s+/g, " ").trim();
+    let clean = raw.replace(/_/g, " ").replace(/\./g, (m, offset, str) => {
+        const prev = offset > 0 ? str[offset - 1] : "";
+        const next = offset < str.length - 1 ? str[offset + 1] : "";
+        const isPrevDigit = prev >= "0" && prev <= "9";
+        const isNextDigit = next >= "0" && next <= "9";
+        return (isPrevDigit && isNextDigit) ? "." : " ";
+    }).replace(/\s+/g, " ").trim();
 
     // 3. TV Series / Anime: SxxExx, SxEE, Exx, Episode xx
     let tvMatch = clean.match(/^(.*?)(?:\s*[-–]\s*|\s+)(S\d+[\s.-]*E\d+|\b\d{1,2}x\d+\b|\bE\d+\b|\bEpisode\s*\d+\b)/i);
@@ -924,6 +977,9 @@ function makeStream(item, serverUrl) {
 }
 
 async function h5aiSearch(server, pattern, href) {
+    if (!isServerHealthy(server.url)) {
+        return [];
+    }
     const targetHref = href || server.root;
     const data = await httpPost(`${server.url}${targetHref}`, {
         action: "get",
@@ -933,7 +989,14 @@ async function h5aiSearch(server, pattern, href) {
             pattern: pattern,
         },
     });
-    return (data && Array.isArray(data.search)) ? data.search : [];
+    if (data && Array.isArray(data.search)) {
+        markServerSuccess(server.url);
+        return data.search;
+    }
+    if (!data) {
+        markServerFailed(server.url);
+    }
+    return [];
 }
 
 async function searchInsideTvFolders(server, foldersToRecurse, season, episode, targetTitle, targetArc, competingArcs, year) {
@@ -996,7 +1059,7 @@ async function searchInsideTvFolders(server, foldersToRecurse, season, episode, 
         }
 
         // If no strict SxxEyy matches, search by episode number within show folder
-        const epNumPattern = `(?<![0-9])0*${epPad}(?![0-9])`;
+        const epNumPattern = `(?:^|[^0-9])0*${epPad}(?![0-9])`;
         const numMatches = await h5aiSearch(server, epNumPattern, folderHref);
 
         // Tier 1: Strict Season Match (pathSeason === targetSeason)
@@ -1147,10 +1210,22 @@ async function searchMovies(server, query, targetTitle, year, isAnimation) {
     return streams;
 }
 
-async function getStreams(tmdbId, mediaType, season, episode) {
+async function getStreams(tmdbIdOrOpts, mediaTypeArg, seasonArg, episodeArg) {
     try {
-        const normType = (mediaType === "series" || mediaType === "tv") ? "tv" : "movie";
-        let rawId = String(tmdbId || "").trim().replace(/^(?:series|movie|tv):/i, "").replace(/^tmdb:/i, "");
+        let tmdbId = tmdbIdOrOpts;
+        let mediaType = mediaTypeArg;
+        let season = seasonArg;
+        let episode = episodeArg;
+
+        if (tmdbIdOrOpts && typeof tmdbIdOrOpts === "object") {
+            tmdbId = tmdbIdOrOpts.tmdbId || tmdbIdOrOpts.id;
+            mediaType = tmdbIdOrOpts.mediaType || tmdbIdOrOpts.type;
+            season = tmdbIdOrOpts.season;
+            episode = tmdbIdOrOpts.episode;
+        }
+
+        const normType = (mediaType === "series" || mediaType === "tv" || (mediaType === "anime" && season != null)) ? "tv" : "movie";
+        let rawId = String(tmdbId || "").trim().replace(/^(?:series|movie|tv|anime):/i, "").replace(/^tmdb:/i, "");
         let cleanId = rawId;
         let reqSeason = season != null ? parseInt(season, 10) : null;
         let reqEpisode = episode != null ? parseInt(episode, 10) : null;
@@ -1322,13 +1397,21 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     }
 }
 
-module.exports = {
-    getStreams,
-    extractTvFolderInfo,
-    matchesTvFolder,
-    matchesMovieTitle,
-    passesEpisodeFilter,
-    cleanTitle,
-    extractSequelTokens,
-    buildSearchQueries
-};
+if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+        getStreams,
+        extractTvFolderInfo,
+        matchesTvFolder,
+        matchesMovieTitle,
+        passesEpisodeFilter,
+        cleanTitle,
+        extractSequelTokens,
+        buildSearchQueries
+    };
+}
+if (typeof globalThis !== "undefined") {
+    globalThis.getStreams = getStreams;
+}
+if (typeof global !== "undefined") {
+    global.getStreams = getStreams;
+}
