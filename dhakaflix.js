@@ -29,6 +29,50 @@ const AUDIO_TABLE = [
 const QUALITY_RANK = { "2160p": 5, "1440p": 4, "1080p": 3, "720p": 2, "480p": 1, "hd": 0 };
 const MAX_RANK = 5;
 
+const ANTHOLOGY_MAP = [
+    {
+        pattern: /dahmer/i,
+        franchiseTitle: "Monster",
+        franchiseYear: "2022",
+        diskSeason: 1,
+        arcPattern: "DAHMER",
+    },
+    {
+        pattern: /menendez|lyle.*erik/i,
+        franchiseTitle: "Monster",
+        franchiseYear: "2022",
+        diskSeason: 2,
+        arcPattern: "Menendez",
+    },
+    {
+        pattern: /ed\s*gein/i,
+        franchiseTitle: "Monster",
+        franchiseYear: "2022",
+        diskSeason: 3,
+        arcPattern: "Ed Gein",
+    },
+    {
+        pattern: /lizzie\s*borden/i,
+        franchiseTitle: "Monster",
+        franchiseYear: "2022",
+        diskSeason: 4,
+        arcPattern: "Lizzie Borden",
+    },
+];
+
+function resolveAnthologySeason(titleList, requestedSeason) {
+    const list = Array.isArray(titleList) ? titleList : [titleList];
+    for (const t of list) {
+        const entry = ANTHOLOGY_MAP.find(e => e.pattern.test(t));
+        if (entry) {
+            // When requested as Season 1 from a standalone miniseries, map to disk season
+            if (requestedSeason === 1) return entry.diskSeason;
+            return requestedSeason;
+        }
+    }
+    return requestedSeason;
+}
+
 async function httpGet(url) {
     try {
         const res = await fetch(url, { headers: { "Accept": "application/json" } });
@@ -72,61 +116,119 @@ async function getTmdbMeta(tmdbId, mediaType) {
     const apiKey = (typeof TMDB_API_KEY !== "undefined" && TMDB_API_KEY) ? TMDB_API_KEY : "01926d2187b6a5d861eefc750e9df3e3";
     if (!apiKey) return null;
 
-    const endpoint = mediaType === "tv" ? "tv" : "movie";
-    const data = await httpGet(`${TMDB_API}/${endpoint}/${tmdbId}?api_key=${apiKey}&append_to_response=alternative_titles`);
-    if (!data) return null;
+    let targetId = tmdbId;
+    let targetType = mediaType;
+    let cinemetaFallback = null;
 
-    const title = data.name || data.title || "";
-    const origTitle = data.original_name || data.original_title || "";
-    const releaseDate = data.release_date || data.first_air_date || "";
-    const year = releaseDate ? releaseDate.slice(0, 4) : "";
-    const isAnimation = Array.isArray(data.genres) && data.genres.some(g => g.id === 16);
-
-    const rawAlts = data.alternative_titles?.titles || data.alternative_titles?.results || [];
-    const preferredRegions = new Set(["US", "GB", "CA", "AU", "JP", "KR", "IN", "BD"]);
-    const primaryClean = cleanTitle(title).toLowerCase();
-    const primaryTokens = extractSequelTokens(title);
-    const hasSeasonOrArc = /\b(?:season|part|ova|oad|special|specials|movie|film)\b/i.test(title);
-    const hasOrdinal = /\b\d+(?:st|nd|rd|th)\b/i.test(title);
-    const primaryHasSub = /\s*[:—]\s*|\s+-\s+/.test(title);
-
-    const aliases = [];
-    const seenClean = new Set();
-    if (primaryClean) seenClean.add(primaryClean);
-    const origClean = cleanTitle(origTitle).toLowerCase();
-    if (origClean) seenClean.add(origClean);
-
-    for (const item of rawAlts) {
-        let alt = (item.title || "").trim();
-        if (!alt) continue;
-
-        if (item.iso_3166_1 && !preferredRegions.has(item.iso_3166_1)) continue;
-
-        // Strip combining marks/diacritics (e.g. Sōsō -> Soso, Bāhubali -> Bahubali)
-        const normalized = alt.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-        if (/[^\x20-\x7E\u2019]/.test(normalized)) continue;
-
-        if (extractSequelTokens(alt) !== primaryTokens) continue;
-
-        if (!hasOrdinal && /\b\d+(?:st|nd|rd|th)\b/i.test(alt)) continue;
-
-        if (!hasSeasonOrArc && /\b(?:season|part|ova|oad|special|specials|movie|film)\b/i.test(alt)) {
-            continue;
+    // Handle IMDb ID (e.g. "tt13207736")
+    if (typeof tmdbId === "string" && tmdbId.startsWith("tt")) {
+        const findData = await httpGet(`${TMDB_API}/find/${tmdbId}?api_key=${apiKey}&external_source=imdb_id`);
+        const found = (mediaType === "tv" ? findData?.tv_results?.[0] : findData?.movie_results?.[0]) ||
+                      findData?.tv_results?.[0] || findData?.movie_results?.[0];
+        if (found?.id) {
+            targetId = found.id;
+            targetType = found.name ? "tv" : "movie";
+        } else {
+            // Fallback to Cinemeta if TMDB /find returned no link
+            const cmType = mediaType === "tv" ? "series" : "movie";
+            const cmData = await httpGet(`https://v3-cinemeta.strem.io/meta/${cmType}/${tmdbId}.json`);
+            if (cmData?.meta?.name) {
+                cinemetaFallback = {
+                    title: cmData.meta.name,
+                    origTitle: cmData.meta.name,
+                    year: (cmData.meta.year || cmData.meta.releaseInfo || "").slice(0, 4),
+                    isAnimation: Array.isArray(cmData.meta.genres) && cmData.meta.genres.some(g => /anim/i.test(g)),
+                    aliases: [],
+                };
+            }
         }
-
-        if (!primaryHasSub && /\s*[:—]\s*|\s+-\s+/.test(alt)) {
-            alt = alt.split(/\s*[:—]\s*|\s+-\s+/)[0].trim();
-        }
-
-        const altClean = cleanTitle(alt).toLowerCase();
-        if (altClean.length < 2 || seenClean.has(altClean)) continue;
-
-        seenClean.add(altClean);
-        aliases.push(alt);
-        if (aliases.length >= 5) break;
     }
 
-    const meta = { title, origTitle, year, isAnimation, aliases };
+    let meta = null;
+
+    if (!cinemetaFallback) {
+        const endpoint = targetType === "tv" ? "tv" : "movie";
+        const data = await httpGet(`${TMDB_API}/${endpoint}/${targetId}?api_key=${apiKey}&append_to_response=alternative_titles`);
+        if (!data) return null;
+
+        const title = data.name || data.title || "";
+        const origTitle = data.original_name || data.original_title || "";
+        const releaseDate = data.release_date || data.first_air_date || "";
+        const year = releaseDate ? releaseDate.slice(0, 4) : "";
+        const isAnimation = Array.isArray(data.genres) && data.genres.some(g => g.id === 16);
+
+        const rawAlts = data.alternative_titles?.titles || data.alternative_titles?.results || [];
+        const preferredRegions = new Set(["US", "GB", "CA", "AU", "JP", "KR", "IN", "BD"]);
+        const primaryClean = cleanTitle(title).toLowerCase();
+        const primaryTokens = extractSequelTokens(title);
+        const hasSeasonOrArc = /\b(?:season|part|ova|oad|special|specials|movie|film)\b/i.test(title);
+        const hasOrdinal = /\b\d+(?:st|nd|rd|th)\b/i.test(title);
+        const primaryHasSub = /\s*[:—–]\s*|\s+-\s+/.test(title);
+
+        const aliases = [];
+        const seenClean = new Set();
+        if (primaryClean) seenClean.add(primaryClean);
+        const origClean = cleanTitle(origTitle).toLowerCase();
+        if (origClean) seenClean.add(origClean);
+
+        for (const item of rawAlts) {
+            let alt = (item.title || "").trim();
+            if (!alt) continue;
+
+            if (item.iso_3166_1 && !preferredRegions.has(item.iso_3166_1)) continue;
+
+            // Strip combining marks/diacritics (e.g. Sōsō -> Soso, Bāhubali -> Bahubali)
+            const normalized = alt.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+            if (/[^\x20-\x7E\u2019]/.test(normalized)) continue;
+
+            if (extractSequelTokens(alt) !== primaryTokens) continue;
+
+            if (!hasOrdinal && /\b\d+(?:st|nd|rd|th)\b/i.test(alt)) continue;
+
+            if (!hasSeasonOrArc && /\b(?:season|part|ova|oad|special|specials|movie|film)\b/i.test(alt)) {
+                continue;
+            }
+
+            if (!primaryHasSub && /\s*[:—–]\s*|\s+-\s+/.test(alt)) {
+                alt = alt.split(/\s*[:—–]\s*|\s+-\s+/)[0].trim();
+            }
+
+            const altClean = cleanTitle(alt).toLowerCase();
+            if (altClean.length < 2 || seenClean.has(altClean)) continue;
+
+            seenClean.add(altClean);
+            aliases.push(alt);
+            if (aliases.length >= 5) break;
+        }
+
+        meta = { title, origTitle, year, isAnimation, aliases };
+    } else {
+        meta = cinemetaFallback;
+    }
+
+    // Auto-enrich aliases with subtitle parts and anthology franchise info
+    const fullTitles = [meta.title, meta.origTitle].filter(Boolean);
+    for (const ft of fullTitles) {
+        const subParts = ft.split(/\s*[:—–]\s*|\s+-\s+/).map(s => s.trim()).filter(Boolean);
+        if (subParts.length > 1) {
+            for (const sp of subParts) {
+                const spClean = cleanTitle(sp).toLowerCase();
+                if (spClean.length >= 2 && !meta.aliases.some(a => cleanTitle(a).toLowerCase() === spClean)) {
+                    meta.aliases.push(sp);
+                }
+            }
+        }
+        for (const entry of ANTHOLOGY_MAP) {
+            if (entry.pattern.test(ft)) {
+                const fClean = cleanTitle(entry.franchiseTitle).toLowerCase();
+                if (!meta.aliases.some(a => cleanTitle(a).toLowerCase() === fClean)) {
+                    meta.aliases.push(entry.franchiseTitle);
+                }
+                break;
+            }
+        }
+    }
+
     cacheSet(tmdbCache, cacheKey, meta);
     return meta;
 }
@@ -172,8 +274,21 @@ function stripArticles(str) {
         .trim();
 }
 
+function normalizePlural(str) {
+    return (str || "").toLowerCase().replace(/\b([a-zA-Z]+)s\b/g, "$1");
+}
+
+function safeDecodeURIComponent(str) {
+    if (!str) return "";
+    try {
+        return decodeURIComponent(str);
+    } catch {
+        return str;
+    }
+}
+
 function extractFolderTitle(path) {
-    const parts = decodeURIComponent(path).split("/").filter(Boolean);
+    const parts = safeDecodeURIComponent(path).split("/").filter(Boolean);
     for (let i = parts.length - 1; i >= 0; i--) {
         const p = parts[i];
         const match = p.match(/^([^(]+?)\s*(?:\((?:(?:TV\s*)?(?:Series|Cartoon|Mini\s*Series)\s*)?\d{4}|\(\d{4}\)|\d{4}\b)/i);
@@ -190,6 +305,15 @@ function buildSearchQueries(title) {
     if (!raw) return [];
 
     const queries = new Set();
+
+    // Check anthology map for high-priority targeted arc/franchise query
+    for (const entry of ANTHOLOGY_MAP) {
+        if (entry.pattern.test(raw)) {
+            queries.add(entry.arcPattern);
+            queries.add(entry.franchiseTitle);
+            break;
+        }
+    }
 
     // Normalized title without apostrophe-s (e.g. "JoJo's" -> "JoJo")
     const deApos = raw.replace(/['\u2019]s\b/gi, "");
@@ -210,18 +334,18 @@ function buildSearchQueries(title) {
         hyphens.forEach(h => queries.add(h));
     }
 
-    // 3. Subtitle splitting on colon, em-dash, or spaced hyphen (" - ")
-    const subParts = raw.split(/\s*[:\u2014]\s*|\s+-\s+/).map(s => s.trim()).filter(Boolean);
+    // 3. Subtitle splitting on colon, en-dash, em-dash, or spaced hyphen (" - ")
+    const subParts = raw.split(/\s*[:\u2013\u2014]\s*|\s+-\s+/).map(s => s.trim()).filter(Boolean);
     if (subParts.length > 1) {
-        const main = subParts[0].replace(/['\u2019]s\b/gi, "");
-        const mainWords = main.replace(/[^a-zA-Z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
-        if (mainWords.length > 0) {
-            queries.add(mainWords.join(".*"));
-        }
-        const sub = subParts[subParts.length - 1].replace(/['\u2019]s\b/gi, "");
-        const subWords = sub.replace(/[^a-zA-Z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
-        if (subWords.length > 0) {
-            queries.add(subWords.join(".*"));
+        for (const part of subParts) {
+            const partClean = part.replace(/['\u2019]s\b/gi, "");
+            const pWords = partClean.replace(/[^a-zA-Z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
+            if (pWords.length > 0) {
+                queries.add(pWords.join(".*"));
+                if (pWords.length === 1 && pWords[0].endsWith("s") && pWords[0].length > 3) {
+                    queries.add(pWords[0].slice(0, -1));
+                }
+            }
         }
     }
 
@@ -254,12 +378,22 @@ function extractSequelTokens(title) {
     return tokens.sort().join(",");
 }
 
+const STOP_AND_EDITION_WORDS = new Set([
+    "the", "a", "an", "and", "of", "in", "on", "to", "for", "with", "by", "at",
+    "edition", "cut", "directors", "director", "extended", "unrated",
+    "uncensored", "remastered", "restored", "criterion", "imax",
+    "anniversary", "special", "repack", "proper", "redux", "final",
+    "theatrical", "version", "deluxe", "collector", "collectors",
+    "part", "vol", "volume"
+]);
+
 function matchesMovieTitle(itemHref, targetTitle) {
     const folderTitle = extractFolderTitle(itemHref);
     const cleanedTarget = cleanTitle(targetTitle).toLowerCase();
     if (!folderTitle || !cleanedTarget) return false;
     if (folderTitle === cleanedTarget) return true;
     if (stripArticles(folderTitle) === stripArticles(cleanedTarget)) return true;
+    if (normalizePlural(folderTitle) === normalizePlural(cleanedTarget)) return true;
 
     // Check sequel/number tokens (e.g. Steins;Gate vs Steins;Gate 0)
     const tTokens = extractSequelTokens(cleanedTarget);
@@ -270,10 +404,18 @@ function matchesMovieTitle(itemHref, targetTitle) {
     const tWords = cleanedTarget.split(/\s+/).filter(Boolean);
     const fWordSet = new Set(fWords);
     const tWordSet = new Set(tWords);
-    if (tWords.length > 1 && tWords.every(w => fWordSet.has(w))) return true;
-    if (fWords.length > 1 && fWords.every(w => tWordSet.has(w))) return true;
 
-    return false;
+    // Extra words in folder must ONLY be edition or stop words
+    const extraInFolder = fWords.filter(w => !tWordSet.has(w));
+    const significantExtra = extraInFolder.filter(w => !STOP_AND_EDITION_WORDS.has(w));
+    if (significantExtra.length > 0) return false;
+
+    // Extra words in target must ONLY be stop or edition words
+    const missingInFolder = tWords.filter(w => !fWordSet.has(w));
+    const significantMissing = missingInFolder.filter(w => !STOP_AND_EDITION_WORDS.has(w));
+    if (significantMissing.length > 0) return false;
+
+    return true;
 }
 
 function matchesMovieYear(lowerPath, year) {
@@ -286,18 +428,43 @@ function matchesMovieYear(lowerPath, year) {
 }
 
 function extractTvFolderInfo(path) {
-    const parts = decodeURIComponent(path).split("/").filter(Boolean);
+    const parts = safeDecodeURIComponent(path).split("/").filter(Boolean);
+    let arcInfo = null;
+    const segmentTitles = [];
+
     for (let i = parts.length - 1; i >= 0; i--) {
         const p = parts[i];
-        const match = p.match(/^([^(]+?)\s*\((?:(?:TV\s*)?(?:Series|Cartoon|Mini\s*Series)\s*)?(\d{4})(?:[–\-](\d{4})?)?/i);
+
+        // Clean any leading index numbers: "1 - Bakemonogatari" -> "bakemonogatari"
+        const cleanSeg = cleanTitle(p.replace(/^\d{1,2}\s*[-–._]\s*/, "")).toLowerCase();
+        if (cleanSeg && !cleanSeg.startsWith("season ") && !cleanSeg.startsWith("anime tv series") && !cleanSeg.startsWith("tv series") && !cleanSeg.startsWith("dhaka flix")) {
+            segmentTitles.push(cleanSeg);
+        }
+
+        // Check for Season (Arc Name) e.g. Season 2 (Monsters-The Lyle and Erik Menendez Story)
+        const seasonArcMatch = p.match(/^Season\s*(\d+)\s*\(([^)]+)\)/i);
+        if (seasonArcMatch && !arcInfo) {
+            arcInfo = {
+                season: parseInt(seasonArcMatch[1], 10),
+                arcTitle: cleanTitle(seasonArcMatch[2]).toLowerCase(),
+            };
+        }
+
+        const match = p.match(/^([^(]+?)\s*\((?:(?:TV\s*)?(?:Series|Cartoon|Mini\s*Series)\s*)?(\d{4})\s*(?:([–\-])\s*(\d{4})?)?/i);
         if (match) {
             const rawTitle = match[1].trim();
-            const baseTitle = rawTitle.split(/\s*[:—]\s*|\s+-\s+/)[0].trim();
+            const baseTitle = rawTitle.split(/\s*[:—–]\s*|\s+-\s+/)[0].trim();
+            const hasDash = Boolean(match[3]);
+            const endYear = match[4] || null;
             return {
                 title: cleanTitle(rawTitle).toLowerCase(),
                 baseTitle: cleanTitle(baseTitle).toLowerCase(),
                 startYear: match[2],
-                endYear: match[3] || null,
+                endYear: endYear,
+                isOngoing: hasDash && !endYear,
+                arcTitle: arcInfo?.arcTitle || null,
+                arcSeason: arcInfo?.season || null,
+                segmentTitles,
             };
         }
     }
@@ -310,25 +477,50 @@ function matchesTvFolder(path, targetTitle, targetYear, serverId) {
         return matchesMovieTitle(path, targetTitle);
     }
     const cleanedTarget = cleanTitle(targetTitle).toLowerCase();
-    const targetBase = cleanTitle(targetTitle.split(/\s*[:—]\s*|\s+-\s+/)[0]).toLowerCase();
+    const targetBase = cleanTitle(targetTitle.split(/\s*[:—–]\s*|\s+-\s+/)[0]).toLowerCase();
 
-    // Sequel tokens must match (e.g. Steins;Gate vs Steins;Gate 0)
-    const tTokens = extractSequelTokens(cleanedTarget);
-    const fTokens = extractSequelTokens(info.title);
-    if (tTokens !== fTokens) return false;
+    // Check arcTitle match (e.g. Season 2 (Monsters-The Lyle and Erik Menendez Story))
+    let arcMatch = false;
+    if (info.arcTitle) {
+        if (info.arcTitle === cleanedTarget ||
+            normalizePlural(info.arcTitle) === normalizePlural(cleanedTarget) ||
+            (cleanedTarget.length > 5 && cleanedTarget.includes(info.arcTitle)) ||
+            (info.arcTitle.length > 10 && info.arcTitle.includes(cleanedTarget))) {
+            arcMatch = true;
+        }
+    }
+
+    // Check subfolder / segment match (e.g. 1 - Bakemonogatari)
+    if (!arcMatch && Array.isArray(info.segmentTitles)) {
+        arcMatch = info.segmentTitles.some(seg =>
+            seg === cleanedTarget ||
+            normalizePlural(seg) === normalizePlural(cleanedTarget) ||
+            (cleanedTarget.length > 5 && seg.includes(cleanedTarget))
+        );
+    }
+
+    // Sequel tokens must match (e.g. Steins;Gate vs Steins;Gate 0) unless it was an explicit arc/segment match
+    if (!arcMatch) {
+        const tTokens = extractSequelTokens(cleanedTarget);
+        const fTokens = extractSequelTokens(info.title);
+        if (tTokens !== fTokens) return false;
+    }
 
     // Check if years align when matching target base title (e.g. Code Geass vs Code Geass: Lelouch of the Rebellion)
     const yearsAlign = targetYear && info.startYear ?
         Math.abs(parseInt(targetYear, 10) - parseInt(info.startYear, 10)) <= 1 : false;
 
-    const titleOk = (info.title === cleanedTarget) ||
+    const titleOk = arcMatch ||
+                    (info.title === cleanedTarget) ||
                     (info.baseTitle === cleanedTarget) ||
-                    (info.title === targetBase && yearsAlign) ||
-                    (info.baseTitle === targetBase && yearsAlign) ||
+                    (normalizePlural(info.title) === normalizePlural(cleanedTarget)) ||
+                    (normalizePlural(info.baseTitle) === normalizePlural(targetBase) && (yearsAlign || info.isOngoing)) ||
+                    (info.title === targetBase && (yearsAlign || info.isOngoing)) ||
+                    (info.baseTitle === targetBase && (yearsAlign || info.isOngoing)) ||
                     (stripArticles(info.title) === stripArticles(cleanedTarget)) ||
                     (stripArticles(info.baseTitle) === stripArticles(cleanedTarget)) ||
-                    (stripArticles(info.title) === stripArticles(targetBase) && yearsAlign) ||
-                    (stripArticles(info.baseTitle) === stripArticles(targetBase) && yearsAlign) ||
+                    (stripArticles(info.title) === stripArticles(targetBase) && (yearsAlign || info.isOngoing)) ||
+                    (stripArticles(info.baseTitle) === stripArticles(targetBase) && (yearsAlign || info.isOngoing)) ||
                     matchesMovieTitle(path, targetTitle);
     if (!titleOk) return false;
 
@@ -343,14 +535,15 @@ function matchesTvFolder(path, targetTitle, targetYear, serverId) {
         const sy = parseInt(info.startYear, 10);
         const ey = info.endYear ? parseInt(info.endYear, 10) : sy;
         if (!isNaN(ty) && !isNaN(sy)) {
-            if (ty < sy - 1 || ty > ey + 1) return false;
+            if (ty < sy - 1) return false;
+            if (!info.isOngoing && ty > ey + 1) return false;
         }
     }
     return true;
 }
 
 function extractSeasonFromPath(path) {
-    const decoded = decodeURIComponent(path || "");
+    const decoded = safeDecodeURIComponent(path || "");
     const filename = decoded.split("/").filter(Boolean).pop() || "";
 
     // 1. Filename SxxExx or Sxx
@@ -393,7 +586,7 @@ function cleanFilenameForEp(fn, targetTitle) {
 }
 
 function passesEpisodeFilter(pathOrFilename, season, episode, allowAbsolute, targetTitle) {
-    const raw = decodeURIComponent(pathOrFilename || "");
+    const raw = safeDecodeURIComponent(pathOrFilename || "");
     const filename = raw.split("/").filter(Boolean).pop() || "";
     const pathSeason = extractSeasonFromPath(raw);
 
@@ -450,7 +643,7 @@ function passesEpisodeFilter(pathOrFilename, season, episode, allowAbsolute, tar
 }
 
 function extractAudioDetails(filename, href) {
-    const raw = decodeURIComponent(filename + " " + href);
+    const raw = safeDecodeURIComponent(filename + " " + href);
     const parts = [];
 
     const audioBracketMatch = raw.match(/\[(Dual Audio|Multi Audio|Hindi Dubbed|English Dubbed|Dubbed)[^\]]*\]\s*\[([^\]]+)\]/i);
@@ -485,7 +678,7 @@ function extractAudioDetails(filename, href) {
 }
 
 function formatCleanTitle(filename) {
-    let raw = decodeURIComponent(filename).replace(/\.(mkv|mp4|avi|webm|ts|m4v)$/i, "");
+    let raw = safeDecodeURIComponent(filename).replace(/\.(mkv|mp4|avi|webm|ts|m4v)$/i, "");
 
     // 1. Remove bracketed release group / uploader tags and metadata brackets [Toonworld4all], [Multi Audio], [1080p], etc.
     raw = raw.replace(/\[[^\]]+\]/g, " ");
@@ -536,9 +729,9 @@ function formatCleanTitle(filename) {
 }
 
 function makeStream(item, serverUrl) {
-    const filename = decodeURIComponent(item.href.split("/").filter(Boolean).pop() || "");
+    const filename = safeDecodeURIComponent(item.href.split("/").filter(Boolean).pop() || "");
     const rawQuality = parseQuality(filename);
-    const quality = rawQuality !== "hd" ? rawQuality : parseQuality(decodeURIComponent(item.href));
+    const quality = rawQuality !== "hd" ? rawQuality : parseQuality(safeDecodeURIComponent(item.href));
     const combined = (filename + " " + item.href).toLowerCase();
 
     let source = "WEB-DL";
@@ -618,6 +811,9 @@ async function searchInsideTvFolders(server, foldersToRecurse, season, episode, 
     const isBleach = titleList.some(t => /bleach/i.test(t));
     const isTybw = isAnimeServer && (titleList.some(t => /thousand|tybw/i.test(t)) || (isBleach && (season === 2 || season === 17)));
 
+    const effectiveSeason = resolveAnthologySeason(titleList, season);
+    const effSPad = String(effectiveSeason).padStart(2, "0");
+
     const subSearches = foldersToRecurse.map(async (folderHref) => {
         const isTybwFolder = /thousand|tybw/i.test(folderHref);
 
@@ -630,7 +826,7 @@ async function searchInsideTvFolders(server, foldersToRecurse, season, episode, 
             for (const pat of tybwPatterns) {
                 const tybwMatches = await h5aiSearch(server, pat, folderHref);
                 const tybwFiles = tybwMatches.filter(item => {
-                    const path = decodeURIComponent(item.href);
+                    const path = safeDecodeURIComponent(item.href);
                     const fn = path.split("/").pop();
                     const isTybwFile = /thousand|tybw/i.test(path);
                     const epRegex = new RegExp(`e0*${epPad}(?![0-9])`, "i");
@@ -646,30 +842,38 @@ async function searchInsideTvFolders(server, foldersToRecurse, season, episode, 
             return [];
         }
 
-        // Standard Season pattern SxxEyy
-        const epPattern = `S${sPad}E0*${epPad}(?![0-9])`;
-        const nestedMatches = await h5aiSearch(server, epPattern, folderHref);
-        const epMatches = nestedMatches.filter(item => {
-            const path = decodeURIComponent(item.href);
-            return /\.(mkv|mp4|avi)$/i.test(path) &&
-                passesEpisodeFilter(path, season, episode, false, targetTitle) &&
-                !path.toLowerCase().includes("/specials/") &&
-                !(isAnimeServer && /thousand|tybw/i.test(path));
-        });
+        // Standard Season patterns (try effective anthology season first if different from requested season)
+        const seasonPatterns = [`S${sPad}E0*${epPad}(?![0-9])`];
+        if (effectiveSeason !== season) {
+            seasonPatterns.unshift(`S${effSPad}E0*${epPad}(?![0-9])`);
+        }
 
-        if (epMatches.length > 0) {
-            return epMatches.map(item => makeStream(item, server.url));
+        for (const epPattern of seasonPatterns) {
+            const nestedMatches = await h5aiSearch(server, epPattern, folderHref);
+            const epMatches = nestedMatches.filter(item => {
+                const path = safeDecodeURIComponent(item.href);
+                return /\.(mkv|mp4|avi)$/i.test(path) &&
+                    (passesEpisodeFilter(path, season, episode, false, targetTitle) ||
+                     passesEpisodeFilter(path, effectiveSeason, episode, false, targetTitle)) &&
+                    !path.toLowerCase().includes("/specials/") &&
+                    !(isAnimeServer && /thousand|tybw/i.test(path));
+            });
+
+            if (epMatches.length > 0) {
+                return epMatches.map(item => makeStream(item, server.url));
+            }
         }
 
         // If no strict SxxEyy matches, search by episode number within show folder
         const epNumPattern = `(?<![0-9])0*${epPad}(?![0-9])`;
         const numMatches = await h5aiSearch(server, epNumPattern, folderHref);
 
-        // Tier 1: Strict Season Match (pathSeason === requestedSeason)
+        // Tier 1: Strict Season Match (pathSeason === requestedSeason or effectiveSeason)
         const strictMatches = numMatches.filter(item => {
-            const path = decodeURIComponent(item.href);
+            const path = safeDecodeURIComponent(item.href);
             return /\.(mkv|mp4|avi)$/i.test(path) &&
-                passesEpisodeFilter(path, season, episode, false, targetTitle) &&
+                (passesEpisodeFilter(path, season, episode, false, targetTitle) ||
+                 passesEpisodeFilter(path, effectiveSeason, episode, false, targetTitle)) &&
                 !path.toLowerCase().includes("/specials/") &&
                 !(isAnimeServer && /thousand|tybw/i.test(path));
         });
@@ -681,7 +885,7 @@ async function searchInsideTvFolders(server, foldersToRecurse, season, episode, 
         // Tier 2: Absolute Fallback for Anime only (e.g. Bleach S02E25 when season === 1)
         if (isAnimeServer) {
             const fallbackMatches = numMatches.filter(item => {
-                const path = decodeURIComponent(item.href);
+                const path = safeDecodeURIComponent(item.href);
                 return /\.(mkv|mp4|avi)$/i.test(path) &&
                     passesEpisodeFilter(path, season, episode, true, targetTitle) &&
                     !path.toLowerCase().includes("/specials/") &&
@@ -704,9 +908,10 @@ async function searchTvEpisodes(server, query, season, episode, targetTitle, yea
     const fileResults = [];
     const foldersToRecurse = [];
     const titleList = Array.isArray(targetTitle) ? targetTitle : [targetTitle];
+    const effectiveSeason = resolveAnthologySeason(titleList, season);
 
     for (const item of rootMatches) {
-        const decodedHref = decodeURIComponent(item.href);
+        const decodedHref = safeDecodeURIComponent(item.href);
         const lowerHref = decodedHref.toLowerCase();
         if (lowerHref.includes("/tutorial/") || lowerHref.includes("/documentary/") || lowerHref.includes("/wwe & aew") || lowerHref.includes("/awards & tv shows/")) continue;
 
@@ -715,7 +920,8 @@ async function searchTvEpisodes(server, query, season, episode, targetTitle, yea
         if (isVideo) {
             const filename = decodedHref.split("/").pop();
             if (titleList.some(t => matchesTvFolder(decodedHref, t, year, server.id)) &&
-                passesEpisodeFilter(decodedHref, season, episode, false, titleList) &&
+                (passesEpisodeFilter(decodedHref, season, episode, false, titleList) ||
+                 passesEpisodeFilter(decodedHref, effectiveSeason, episode, false, titleList)) &&
                 !decodedHref.toLowerCase().includes("/specials/")) {
                 fileResults.push(makeStream(item, server.url));
             }
@@ -726,19 +932,28 @@ async function searchTvEpisodes(server, query, season, episode, targetTitle, yea
         }
     }
 
+    // Prune redundant subfolders (e.g. if parent show folder is present, don't recurse into both parent and child separately)
+    const prunedFolders = [];
+    const sortedFolders = [...foldersToRecurse].sort((a, b) => a.length - b.length);
+    for (const f of sortedFolders) {
+        if (!prunedFolders.some(p => f !== p && f.startsWith(p))) {
+            prunedFolders.push(f);
+        }
+    }
+
     // If folders exist, exclusively search inside show folders to ensure correct season/part matching
-    if (foldersToRecurse.length === 0 && fileResults.length > 0) {
+    if (prunedFolders.length === 0 && fileResults.length > 0) {
         return { streams: fileResults, folders: [] };
     }
 
-    const nestedStreams = await searchInsideTvFolders(server, foldersToRecurse, season, episode, titleList);
-    const combined = foldersToRecurse.length > 0 ? nestedStreams : fileResults;
+    const nestedStreams = await searchInsideTvFolders(server, prunedFolders, season, episode, titleList);
+    const combined = prunedFolders.length > 0 ? nestedStreams : fileResults;
     const seenHrefs = new Set();
     const uniqueStreams = combined.filter(s => !seenHrefs.has(s.url) && seenHrefs.add(s.url));
-    return { streams: uniqueStreams, folders: foldersToRecurse };
+    return { streams: uniqueStreams, folders: prunedFolders };
 }
 
-async function searchMovies(server, query, targetTitle, year) {
+async function searchMovies(server, query, targetTitle, year, isAnimation) {
     const matches = await h5aiSearch(server, query);
     if (!matches.length) return [];
 
@@ -748,12 +963,13 @@ async function searchMovies(server, query, targetTitle, year) {
     const titleList = Array.isArray(targetTitle) ? targetTitle : [targetTitle];
 
     for (const item of matches) {
-        const decoded = decodeURIComponent(item.href);
+        const decoded = safeDecodeURIComponent(item.href);
         const isVideo = /\.(mkv|mp4|avi)$/i.test(decoded);
         const lowerPath = decoded.toLowerCase();
 
         if (lowerPath.includes("tv-web-series") || lowerPath.includes("anime-tv series")) continue;
         if (lowerPath.includes("sample")) continue;
+        if (isAnimation === false && (lowerPath.includes("animation movies") || lowerPath.includes("/anime/"))) continue;
 
         if (isVideo) {
             if (titleList.some(t => matchesMovieTitle(item.href, t)) && matchesMovieYear(lowerPath, year)) {
@@ -858,14 +1074,18 @@ async function getStreams(tmdbId, mediaType, season, episode) {
             if (!query) continue;
 
             const tasks = targetServers.map(async server => {
-                if (mediaType === "tv") {
-                    const res = await searchTvEpisodes(server, query, season, episode, candidateTitles, meta.year);
-                    if (res.folders && res.folders.length > 0) {
-                        discoveredFolders.push({ serverId: server.id, folders: res.folders });
+                try {
+                    if (mediaType === "tv") {
+                        const res = await searchTvEpisodes(server, query, season, episode, candidateTitles, meta.year);
+                        if (res.folders && res.folders.length > 0) {
+                            discoveredFolders.push({ serverId: server.id, folders: res.folders });
+                        }
+                        return res.streams;
+                    } else {
+                        return await searchMovies(server, query, candidateTitles, meta.year, meta.isAnimation);
                     }
-                    return res.streams;
-                } else {
-                    return searchMovies(server, query, candidateTitles, meta.year);
+                } catch {
+                    return [];
                 }
             });
 
