@@ -418,6 +418,35 @@ function extractAudioDetails(filename, href) {
     return parts.join(" • ") || "Original Audio";
 }
 
+function formatCleanTitle(filename) {
+    const raw = decodeURIComponent(filename).replace(/\.(mkv|mp4|avi)$/i, "");
+    let clean = raw.replace(/(?<=[a-zA-Z])\.(?=[a-zA-Z0-9])|(?<=[0-9])\.(?=[a-zA-Z])|_/g, " ");
+    clean = clean.replace(/\s+/g, " ").trim();
+
+    // 1. TV Series / Anime: SxxEyy, Exx, Episode xx
+    const tvMatch = clean.match(/^(.*?)(?:\s*[-–]\s*|\s+)(S\d+[\s.-]*E\d+|\bE\d+\b|\bEpisode\s*\d+\b)/i);
+    if (tvMatch) {
+        const title = tvMatch[1].replace(/[-–.\s()]+$/, "").trim();
+        let ep = tvMatch[2].replace(/\s+/g, " ").trim();
+        if (/^s\d+[\s.-]*e\d+$/i.test(ep)) ep = ep.toUpperCase().replace(/[\s.-]+/g, "");
+        else if (/^e\d+$/i.test(ep)) ep = ep.toUpperCase();
+        return title + " • " + ep;
+    }
+
+    // 2. Movies: 4-digit release year
+    const movieMatch = clean.match(/^(.*?)(?:\s*\(?((?:19\d{2}|20[0-2]\d))\)?)/i);
+    if (movieMatch) {
+        const title = movieMatch[1].replace(/[-–.\s()]+$/, "").trim();
+        const year = movieMatch[2];
+        return title + " • " + year;
+    }
+
+    // 3. Fallback: cut before quality tags
+    const parts = clean.split(/\b(?:2160p|1440p|1080p|720p|480p|web-?dl|bluray|bdrip|webrip|hdtv|x264|x265|hevc|10bit)\b/i);
+    const fallback = parts[0].replace(/[-–.\s()]+$/, "").trim();
+    return fallback || clean;
+}
+
 function makeStream(item, serverUrl) {
     const filename = decodeURIComponent(item.href.split("/").filter(Boolean).pop() || "");
     const rawQuality = parseQuality(filename);
@@ -434,17 +463,22 @@ function makeStream(item, serverUrl) {
     const isDv = /\b(?:dv|dolby\s*vision)\b/.test(combined) ? "DV" : "";
     const is10Bit = /\b10bit\b/.test(combined) ? "10Bit" : "";
 
-    // TOP LINE: Resolution and video quality only (no DhakaFlix)
+    // TOP LINE: Resolution and video quality tags separated by bullets
     const qualityLabel = quality.toUpperCase();
     const topParts = [qualityLabel, source, isImax && "IMAX", isHdr, isDv, is10Bit].filter(Boolean);
     const topLine = topParts.join(" • ");
 
-    // BELOW: full release filename, audio track details, file size
+    // Line 2: Clean Title • Year / SxxExx
+    const cleanTitle = formatCleanTitle(filename);
+
+    // Line 3: Audio details (language, channels, Atmos)
     const audioDetails = extractAudioDetails(filename, item.href);
+
+    // Line 4: File size
     const fileSize = formatBytes(item.size);
 
     const belowLines = [
-        filename,
+        cleanTitle,
         audioDetails,
         fileSize
     ].filter(Boolean).join("\n");
@@ -453,16 +487,26 @@ function makeStream(item, serverUrl) {
     const sortTag = getSortTag(rank);
     const fullUrl = `${serverUrl}${item.href}`;
 
-    return {
+    // Nuvio Mobile/PC prefixes 'quality' to Line 2, creating duplicate resolution.
+    // Nuvio TV requires 'quality' to match 'name' to prevent appending '- Unknown'.
+    // Detect Mobile/PC host functions (__plugin_sleep, __crypto_md5) to only pass quality on TV.
+    const isMobileOrPC = typeof __plugin_sleep !== "undefined" || typeof __crypto_md5 !== "undefined";
+
+    const stream = {
         name: sortTag + topLine,
-        title: filename,
-        quality: qualityLabel,
+        title: cleanTitle,
         size: belowLines,
         url: fullUrl,
         headers: { "User-Agent": HEADERS["User-Agent"] },
         _rank: rank,
         _size: item.size || 0,
     };
+
+    if (!isMobileOrPC) {
+        stream.quality = qualityLabel;
+    }
+
+    return stream;
 }
 
 async function h5aiSearch(server, pattern, href) {
