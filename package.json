@@ -1,0 +1,12 @@
+{
+  "name": "dhakaflix-plugin",
+  "version": "1.0.3",
+  "description": "DhakaFlix BDIX scraper for Nuvio",
+  "main": "dhakaflix.js",
+  "scripts": {
+    "test": "node test/verify.js"
+  },
+  "keywords": ["bdix", "dhakaflix", "nuvio", "scraper"],
+  "author": "CodeineXO",
+  "license": "ISC"
+}
