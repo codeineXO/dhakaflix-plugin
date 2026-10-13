@@ -291,6 +291,88 @@ const BENCHMARK_TITLES = [
         mustInclude: ["Demon Slayer", "Kimetsu no Yaiba"],
         mustNotInclude: []
     },
+    // --- Anthologies, Multi-Arcs & Franchises ---
+    {
+        name: "American Crime Story - S01E01 (O.J. Simpson)",
+        type: "tv",
+        tmdbId: 64513,
+        season: 1,
+        episode: 1,
+        mustInclude: ["Crime Story", "Simpson", "People v"],
+        mustNotInclude: ["Versace", "Impeachment"]
+    },
+    {
+        name: "American Crime Story - S02E01 (Versace)",
+        type: "tv",
+        tmdbId: 64513,
+        season: 2,
+        episode: 1,
+        mustInclude: ["American Crime Story", "Season 2", "S02"],
+        mustNotInclude: ["Simpson", "Impeachment", "S01"]
+    },
+    {
+        name: "True Detective - S04E01 (Night Country)",
+        type: "tv",
+        tmdbId: 46648,
+        season: 4,
+        episode: 1,
+        mustInclude: ["True Detective", "Season 4", "S04"],
+        mustNotInclude: []
+    },
+    {
+        name: "Monogatari / Bakemonogatari (S01E01)",
+        type: "tv",
+        tmdbId: 46195,
+        season: 1,
+        episode: 1,
+        mustInclude: ["Bakemonogatari"],
+        mustNotInclude: ["Nisemonogatari", "Kizumonogatari", "Nekomonogatari"]
+    },
+    {
+        name: "Doctor Who 2024 (S01E01 -> S14)",
+        type: "tv",
+        tmdbId: 239770,
+        season: 1,
+        episode: 1,
+        mustInclude: ["Doctor Who", "Season 14"],
+        mustNotInclude: ["Season 01", "Rose"]
+    },
+    {
+        name: "The Office US (S01E01)",
+        type: "tv",
+        tmdbId: 2316,
+        season: 1,
+        episode: 1,
+        mustInclude: ["The Office US"],
+        mustNotInclude: ["The Office UK"]
+    },
+    {
+        name: "The Office UK (S01E01)",
+        type: "tv",
+        tmdbId: 2996,
+        season: 1,
+        episode: 1,
+        mustInclude: ["The Office UK"],
+        mustNotInclude: ["The Office US"]
+    },
+    {
+        name: "Fullmetal Alchemist 2003 (S01E01)",
+        type: "tv",
+        tmdbId: 37863,
+        season: 1,
+        episode: 1,
+        mustInclude: ["Fullmetal Alchemist"],
+        mustNotInclude: ["Brotherhood"]
+    },
+    {
+        name: "Fate/Zero (S01E01)",
+        type: "tv",
+        tmdbId: 45845,
+        season: 1,
+        episode: 1,
+        mustInclude: ["Fate-Zero", "Fate Zero", "Fate/Zero"],
+        mustNotInclude: ["stay night", "Blade Works", "Apocrypha"]
+    },
 
     // --- Movies ---
     {
@@ -356,9 +438,17 @@ async function runLiveBenchmarks() {
 
     for (const item of BENCHMARK_TITLES) {
         await checkAsync(`${item.name}`, async () => {
-            const streams = item.type === "tv"
+            let streams = item.type === "tv"
                 ? await dhakaflix.getStreams(item.tmdbId, item.type, item.season, item.episode)
                 : await dhakaflix.getStreams(item.tmdbId, item.type);
+
+            // If empty due to transient BDIX socket drop, retry once after a short breather
+            if (!streams || streams.length === 0) {
+                await new Promise(r => setTimeout(r, 1000));
+                streams = item.type === "tv"
+                    ? await dhakaflix.getStreams(item.tmdbId, item.type, item.season, item.episode)
+                    : await dhakaflix.getStreams(item.tmdbId, item.type);
+            }
 
             // 1. Must find at least 1 stream
             assert.ok(streams && streams.length > 0, `0 streams returned for ${item.name}`);

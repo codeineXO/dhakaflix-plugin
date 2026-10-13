@@ -58,15 +58,30 @@ const ANTHOLOGY_MAP = [
         diskSeason: 4,
         arcPattern: "Lizzie Borden",
     },
+    {
+        pattern: /doctor who/i,
+        yearPattern: /^202[4-9]/,
+        franchiseTitle: "Doctor Who",
+        franchiseYear: "2005",
+        diskSeasonOffset: 13, // 2024 Season 1 -> disk Season 14
+        arcPattern: "Doctor Who",
+    },
 ];
 
-function resolveAnthologySeason(titleList, requestedSeason) {
+function resolveAnthologySeason(titleList, requestedSeason, year) {
     const list = Array.isArray(titleList) ? titleList : [titleList];
     for (const t of list) {
-        const entry = ANTHOLOGY_MAP.find(e => e.pattern.test(t));
+        const entry = ANTHOLOGY_MAP.find(e => {
+            if (!e.pattern.test(t)) return false;
+            if (e.yearPattern && (!year || !e.yearPattern.test(String(year)))) return false;
+            return true;
+        });
         if (entry) {
+            if (entry.diskSeasonOffset != null) {
+                return requestedSeason + entry.diskSeasonOffset;
+            }
             // When requested as Season 1 from a standalone miniseries, map to disk season
-            if (requestedSeason === 1) return entry.diskSeason;
+            if (requestedSeason === 1 && entry.diskSeason != null) return entry.diskSeason;
             return requestedSeason;
         }
     }
@@ -76,7 +91,10 @@ function resolveAnthologySeason(titleList, requestedSeason) {
 async function httpGet(url, retries = 2) {
     for (let i = 0; i <= retries; i++) {
         try {
-            const res = await fetch(url, { headers: { "Accept": "application/json" } });
+            const res = await fetch(url, {
+                headers: { "Accept": "application/json" },
+                signal: AbortSignal.timeout(5000),
+            });
             if (res.ok) return await res.json();
         } catch {
             if (i < retries) {
@@ -94,6 +112,7 @@ async function httpPost(url, body, retries = 2) {
                 method: "POST",
                 headers: HEADERS,
                 body: JSON.stringify(body),
+                signal: AbortSignal.timeout(25000),
             });
             if (res.ok) return await res.json();
         } catch {
@@ -135,13 +154,21 @@ async function getTmdbMeta(tmdbId, mediaType) {
     let cinemetaFallback = null;
 
     // Handle IMDb ID (e.g. "tt13207736")
+    let cinemetaExtraTitle = null;
     if (typeof rawId === "string" && rawId.startsWith("tt")) {
         const findData = await httpGet(`${TMDB_API}/find/${rawId}?api_key=${apiKey}&external_source=imdb_id`);
-        const found = (normType === "tv" ? findData?.tv_results?.[0] : findData?.movie_results?.[0]) ||
-                      findData?.tv_results?.[0] || findData?.movie_results?.[0];
+        const found = normType === "tv" ? findData?.tv_results?.[0] : findData?.movie_results?.[0];
         if (found?.id) {
             targetId = found.id;
-            targetType = found.name ? "tv" : "movie";
+            targetType = normType;
+            // Also check Cinemeta in background in case IMDb ID refers to a specific anime sub-arc (e.g. Bakemonogatari)
+            try {
+                const cmType = normType === "tv" ? "series" : "movie";
+                const cmData = await httpGet(`https://v3-cinemeta.strem.io/meta/${cmType}/${rawId}.json`);
+                if (cmData?.meta?.name) {
+                    cinemetaExtraTitle = cmData.meta.name;
+                }
+            } catch {}
         } else {
             // Fallback to Cinemeta if TMDB /find returned no link
             const cmType = normType === "tv" ? "series" : "movie";
@@ -153,6 +180,7 @@ async function getTmdbMeta(tmdbId, mediaType) {
                     year: (cmData.meta.year || cmData.meta.releaseInfo || "").slice(0, 4),
                     isAnimation: Array.isArray(cmData.meta.genres) && cmData.meta.genres.some(g => /anim/i.test(g)),
                     aliases: [],
+                    seasonsMap: {},
                 };
             }
         }
@@ -171,6 +199,19 @@ async function getTmdbMeta(tmdbId, mediaType) {
         const year = releaseDate ? releaseDate.slice(0, 4) : "";
         const isAnimation = Array.isArray(data.genres) && data.genres.some(g => g.id === 16);
 
+        // Extract seasons map for anthologies and multi-arc shows (e.g. Bakemonogatari, Night Country, Versace)
+        const seasonsMap = {};
+        if (targetType === "tv" && Array.isArray(data.seasons)) {
+            for (const s of data.seasons) {
+                if (s.season_number != null && s.name) {
+                    const sName = s.name.trim();
+                    if (!/^(?:season|series|miniseries)\s*\d*$/i.test(sName) && !/^specials?$/i.test(sName)) {
+                        seasonsMap[s.season_number] = sName;
+                    }
+                }
+            }
+        }
+
         const rawAlts = data.alternative_titles?.titles || data.alternative_titles?.results || [];
         const preferredRegions = new Set(["US", "GB", "CA", "AU", "JP", "KR", "IN", "BD"]);
         const primaryClean = cleanTitle(title).toLowerCase();
@@ -184,6 +225,14 @@ async function getTmdbMeta(tmdbId, mediaType) {
         if (primaryClean) seenClean.add(primaryClean);
         const origClean = cleanTitle(origTitle).toLowerCase();
         if (origClean) seenClean.add(origClean);
+
+        if (cinemetaExtraTitle) {
+            const cmClean = cleanTitle(cinemetaExtraTitle).toLowerCase();
+            if (cmClean && !seenClean.has(cmClean)) {
+                seenClean.add(cmClean);
+                aliases.push(cinemetaExtraTitle);
+            }
+        }
 
         for (const item of rawAlts) {
             let alt = (item.title || "").trim();
@@ -215,7 +264,7 @@ async function getTmdbMeta(tmdbId, mediaType) {
             if (aliases.length >= 5) break;
         }
 
-        meta = { title, origTitle, year, isAnimation, aliases };
+        meta = { title, origTitle, year, isAnimation, aliases, seasonsMap };
     } else {
         meta = cinemetaFallback;
     }
@@ -648,13 +697,15 @@ function cleanFilenameForEp(fn, targetTitle) {
     return s.trim();
 }
 
-function passesEpisodeFilter(pathOrFilename, season, episode, allowAbsolute, targetTitle) {
+function passesEpisodeFilter(pathOrFilename, season, episode, allowAbsolute, targetTitle, competingArcs) {
     const raw = safeDecodeURIComponent(pathOrFilename || "");
     const filename = raw.split("/").filter(Boolean).pop() || "";
     const pathSeason = extractSeasonFromPath(raw);
 
-    if (!allowAbsolute) {
-        if (pathSeason !== null && pathSeason !== season) {
+    // If the path explicitly belongs to a different season, reject it!
+    // Absolute cross-season fallback is only allowed for high episode numbers (> 24) where seasons are split continuously
+    if (pathSeason !== null && pathSeason !== season) {
+        if (!allowAbsolute || parseInt(episode, 10) <= 24) {
             return false;
         }
     }
@@ -662,6 +713,25 @@ function passesEpisodeFilter(pathOrFilename, season, episode, allowAbsolute, tar
     // Reject specials and OVAs when requesting regular seasons (season > 0)
     if (season > 0 && /(?:^|[^a-zA-Z0-9])(?:special|specials|ova|oad|sp)(?:[^a-zA-Z0-9]|$)/i.test(filename)) {
         return false;
+    }
+
+    // Reject files that belong to a competing arc in an anthology or franchise (e.g. Nisemonogatari leaking into Bakemonogatari)
+    if (Array.isArray(competingArcs) && competingArcs.length > 0) {
+        const lowerRaw = raw.toLowerCase();
+        for (const comp of competingArcs) {
+            const compClean = cleanTitle(comp).toLowerCase();
+            const compWords = compClean.split(/\s+/).filter(w => w.length > 3 && !/^(?:season|series|the|and|part|miniseries)$/i.test(w));
+            if (compWords.length > 0) {
+                const compRegex = new RegExp(`\\b(?:${compWords.join("|")})\\b`, "i");
+                if (compRegex.test(lowerRaw)) {
+                    const titles = Array.isArray(targetTitle) ? targetTitle : [targetTitle];
+                    const allowed = titles.some(t => compRegex.test(cleanTitle(t).toLowerCase()));
+                    if (!allowed) {
+                        return false;
+                    }
+                }
+            }
+        }
     }
 
     const s = String(season).padStart(2, "0");
@@ -866,7 +936,7 @@ async function h5aiSearch(server, pattern, href) {
     return (data && Array.isArray(data.search)) ? data.search : [];
 }
 
-async function searchInsideTvFolders(server, foldersToRecurse, season, episode, targetTitle) {
+async function searchInsideTvFolders(server, foldersToRecurse, season, episode, targetTitle, targetArc, competingArcs, year) {
     const sPad = String(season).padStart(2, "0");
     const epPad = String(episode);
     const isAnimeServer = (server.id === "df10");
@@ -874,7 +944,7 @@ async function searchInsideTvFolders(server, foldersToRecurse, season, episode, 
     const isBleach = titleList.some(t => /bleach/i.test(t));
     const isTybw = isAnimeServer && (titleList.some(t => /thousand|tybw/i.test(t)) || (isBleach && (season === 2 || season === 17)));
 
-    const effectiveSeason = resolveAnthologySeason(titleList, season);
+    const effectiveSeason = resolveAnthologySeason(titleList, season, year);
     const effSPad = String(effectiveSeason).padStart(2, "0");
 
     const subSearches = foldersToRecurse.map(async (folderHref) => {
@@ -915,7 +985,7 @@ async function searchInsideTvFolders(server, foldersToRecurse, season, episode, 
             const epMatches = nestedMatches.filter(item => {
                 const path = safeDecodeURIComponent(item.href);
                 return /\.(mkv|mp4|avi)$/i.test(path) &&
-                    passesEpisodeFilter(path, targetSeason, episode, false, targetTitle) &&
+                    passesEpisodeFilter(path, targetSeason, episode, false, targetTitle, competingArcs) &&
                     !path.toLowerCase().includes("/specials/") &&
                     !(isAnimeServer && /thousand|tybw/i.test(path));
             });
@@ -933,7 +1003,7 @@ async function searchInsideTvFolders(server, foldersToRecurse, season, episode, 
         const strictMatches = numMatches.filter(item => {
             const path = safeDecodeURIComponent(item.href);
             return /\.(mkv|mp4|avi)$/i.test(path) &&
-                passesEpisodeFilter(path, targetSeason, episode, false, targetTitle) &&
+                passesEpisodeFilter(path, targetSeason, episode, false, targetTitle, competingArcs) &&
                 !path.toLowerCase().includes("/specials/") &&
                 !(isAnimeServer && /thousand|tybw/i.test(path));
         });
@@ -947,7 +1017,7 @@ async function searchInsideTvFolders(server, foldersToRecurse, season, episode, 
             const fallbackMatches = numMatches.filter(item => {
                 const path = safeDecodeURIComponent(item.href);
                 return /\.(mkv|mp4|avi)$/i.test(path) &&
-                    passesEpisodeFilter(path, season, episode, true, targetTitle) &&
+                    passesEpisodeFilter(path, season, episode, true, targetTitle, competingArcs) &&
                     !path.toLowerCase().includes("/specials/") &&
                     !(isAnimeServer && !isTybw && /thousand|tybw/i.test(path));
             });
@@ -961,14 +1031,14 @@ async function searchInsideTvFolders(server, foldersToRecurse, season, episode, 
     return nestedStreams.flat();
 }
 
-async function searchTvEpisodes(server, query, season, episode, targetTitle, year, isAnimation) {
+async function searchTvEpisodes(server, query, season, episode, targetTitle, year, isAnimation, targetArc, competingArcs) {
     const rootMatches = await h5aiSearch(server, query);
     if (!rootMatches.length) return { streams: [], folders: [] };
 
     const fileResults = [];
     const foldersToRecurse = [];
     const titleList = Array.isArray(targetTitle) ? targetTitle : [targetTitle];
-    const effectiveSeason = resolveAnthologySeason(titleList, season);
+    const effectiveSeason = resolveAnthologySeason(titleList, season, year);
 
     for (const item of rootMatches) {
         const decodedHref = safeDecodeURIComponent(item.href);
@@ -980,7 +1050,7 @@ async function searchTvEpisodes(server, query, season, episode, targetTitle, yea
         if (isVideo) {
             const filename = decodedHref.split("/").pop();
             if (titleList.some(t => matchesTvFolder(decodedHref, t, year, server.id, isAnimation)) &&
-                passesEpisodeFilter(decodedHref, effectiveSeason, episode, false, titleList) &&
+                passesEpisodeFilter(decodedHref, effectiveSeason, episode, false, titleList, competingArcs) &&
                 !decodedHref.toLowerCase().includes("/specials/")) {
                 fileResults.push(makeStream(item, server.url));
             }
@@ -991,11 +1061,26 @@ async function searchTvEpisodes(server, query, season, episode, targetTitle, yea
         }
     }
 
-    // Prune redundant subfolders (e.g. if parent show folder is present, don't recurse into both parent and child separately)
+    // If any folder is a specific subfolder matching targetArc or targetTitle, prioritize specific subfolder over parent container
+    const specificFolders = foldersToRecurse.filter(f => {
+        const decoded = safeDecodeURIComponent(f).toLowerCase();
+        if (targetArc) {
+            const ca = cleanTitle(targetArc).toLowerCase();
+            if (ca.length > 3 && decoded.includes(ca)) return true;
+        }
+        return titleList.some(t => {
+            const ct = cleanTitle(t).toLowerCase();
+            return ct.length > 3 && decoded.includes(ct);
+        });
+    });
+    const candidateFolders = specificFolders.length > 0 ? specificFolders : foldersToRecurse;
+
+    // Prune redundant subfolders:
+    // If specific subfolders exist (e.g. child folders), discard any broader parent folder that encompasses them
     const prunedFolders = [];
-    const sortedFolders = [...foldersToRecurse].sort((a, b) => a.length - b.length);
+    const sortedFolders = [...candidateFolders].sort((a, b) => b.length - a.length);
     for (const f of sortedFolders) {
-        if (!prunedFolders.some(p => f !== p && f.startsWith(p))) {
+        if (!prunedFolders.some(selected => selected !== f && selected.startsWith(f))) {
             prunedFolders.push(f);
         }
     }
@@ -1005,7 +1090,7 @@ async function searchTvEpisodes(server, query, season, episode, targetTitle, yea
         return { streams: fileResults, folders: [] };
     }
 
-    const nestedStreams = await searchInsideTvFolders(server, prunedFolders, season, episode, titleList);
+    const nestedStreams = await searchInsideTvFolders(server, prunedFolders, season, episode, titleList, targetArc, competingArcs, year);
     const combined = prunedFolders.length > 0 ? nestedStreams : fileResults;
     const seenHrefs = new Set();
     const uniqueStreams = combined.filter(s => !seenHrefs.has(s.url) && seenHrefs.add(s.url));
@@ -1099,13 +1184,30 @@ async function getStreams(tmdbId, mediaType, season, episode) {
             }
         }
 
+        let targetArc = null;
+        let competingArcs = [];
+        if (normType === "tv" && reqSeason != null && meta.seasonsMap) {
+            if (meta.seasonsMap[reqSeason]) {
+                targetArc = meta.seasonsMap[reqSeason];
+                if (!candidateTitles.includes(targetArc)) {
+                    candidateTitles.unshift(targetArc);
+                } else {
+                    candidateTitles.splice(candidateTitles.indexOf(targetArc), 1);
+                    candidateTitles.unshift(targetArc);
+                }
+            }
+            competingArcs = Object.entries(meta.seasonsMap)
+                .filter(([sn]) => parseInt(sn, 10) !== reqSeason)
+                .map(([, name]) => name);
+        }
+
         // Fast-path: check TV folder cache for already discovered show folders (instant warm search)
         if (normType === "tv" && tvFolderCache.has(String(cleanId))) {
             const cachedServerEntries = tvFolderCache.get(String(cleanId));
             const subTasks = cachedServerEntries.map(async entry => {
                 const s = SERVERS.find(srv => srv.id === entry.serverId);
                 if (!s) return [];
-                return searchInsideTvFolders(s, entry.folders, reqSeason, reqEpisode, candidateTitles);
+                return searchInsideTvFolders(s, entry.folders, reqSeason, reqEpisode, candidateTitles, targetArc, competingArcs, meta.year);
             });
             const subResults = (await Promise.all(subTasks)).flat();
             if (subResults.length > 0) {
@@ -1148,7 +1250,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
             const tasks = targetServers.map(async server => {
                 try {
                     if (normType === "tv") {
-                        const res = await searchTvEpisodes(server, query, reqSeason, reqEpisode, candidateTitles, meta.year, meta.isAnimation);
+                        const res = await searchTvEpisodes(server, query, reqSeason, reqEpisode, candidateTitles, meta.year, meta.isAnimation, targetArc, competingArcs);
                         if (res.folders && res.folders.length > 0) {
                             discoveredFolders.push({ serverId: server.id, folders: res.folders });
                         }
@@ -1181,7 +1283,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
                 if (!query) continue;
 
                 const tasks = fallbackServers.map(async server => {
-                    const res = await searchTvEpisodes(server, query, reqSeason, reqEpisode, candidateTitles, meta.year, meta.isAnimation);
+                    const res = await searchTvEpisodes(server, query, reqSeason, reqEpisode, candidateTitles, meta.year, meta.isAnimation, targetArc, competingArcs);
                     if (res.folders && res.folders.length > 0) {
                         discoveredFolders.push({ serverId: server.id, folders: res.folders });
                     }
