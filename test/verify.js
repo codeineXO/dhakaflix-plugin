@@ -129,7 +129,36 @@ function runUnitTests() {
         assert.strictEqual(ok, true, "Absolute episode 25 should match");
     });
 
-    // 4. Android TV / QuickJS compatibility test (missing setTimeout / clearTimeout)
+    // 4. Episodic franchise folders (<Franchise>-Episode <N> - <Subtitle>)
+    const { matchesEpisodicMovieFolder } = dhakaflix;
+    const NEW_HOPE = "/DHAKA-FLIX-7/English Movies/(1960-1994)/Star Wars-Episode IV - A New Hope (1977) 720p [Dual Audio]/";
+    const EMPIRE = "/DHAKA-FLIX-7/English Movies/(1960-1994)/Star Wars-Episode V - The Empire Strikes Back (1980) 720p [Dual Audio]/";
+    const FORCE = "/DHAKA-FLIX-7/English Movies/(2015)/Star Wars-Episode VII - The Force Awakens (2015) 720p [Dual Audio]/";
+
+    check("Episodic folder: 'Star Wars' (primary title) matches Episode IV folder", () => {
+        assert.strictEqual(matchesEpisodicMovieFolder(NEW_HOPE, "Star Wars", true), true);
+        assert.strictEqual(matchesEpisodicMovieFolder(NEW_HOPE + "Star Wars Episode IV (1977) RM 720p BluRay.mkv", "Star Wars", true), true);
+    });
+
+    check("Episodic folder: bare franchise alias does NOT match (only allowed for the primary title)", () => {
+        assert.strictEqual(matchesEpisodicMovieFolder(NEW_HOPE, "Star Wars", false), false);
+    });
+
+    check("Episodic folder: subtitle title matches ('The Empire Strikes Back')", () => {
+        assert.strictEqual(matchesEpisodicMovieFolder(EMPIRE, "The Empire Strikes Back", false), true);
+        assert.strictEqual(matchesEpisodicMovieFolder(NEW_HOPE, "The Empire Strikes Back", false), false);
+    });
+
+    check("Episodic folder: franchise + subtitle matches ('Star Wars: The Force Awakens')", () => {
+        assert.strictEqual(matchesEpisodicMovieFolder(FORCE, "Star Wars: The Force Awakens", false), true);
+        assert.strictEqual(matchesEpisodicMovieFolder(EMPIRE, "Star Wars: The Force Awakens", false), false);
+    });
+
+    check("Episodic folder: ordinary folders are untouched", () => {
+        assert.strictEqual(matchesEpisodicMovieFolder("/DHAKA-FLIX-14/English Movies (1080p)/(2014) 1080p/Interstellar (2014) 1080p [Dual Audio]/", "Interstellar", true), false);
+    });
+
+    // 5. Android TV / QuickJS compatibility test (missing setTimeout / clearTimeout)
     check("QuickJS compatibility: functions without throwing when setTimeout/clearTimeout are missing", () => {
         const fs = require("fs");
         const code = fs.readFileSync(require.resolve("../dhakaflix.js"), "utf8");
@@ -461,6 +490,34 @@ const BENCHMARK_TITLES = [
         tmdbId: 569094,
         mustInclude: ["Across the Spider-Verse", "Across%20the%20Spider-Verse"],
         mustNotInclude: ["Into the Spider-Verse"]
+    },
+    {
+        name: "Star Wars (1977, Episode IV folder)",
+        type: "movie",
+        tmdbId: 11,
+        mustInclude: ["A New Hope"],
+        mustNotInclude: ["Empire Strikes Back", "Return of the Jedi", "Phantom Menace", "Force Awakens"]
+    },
+    {
+        name: "The Empire Strikes Back (1980, Episode V folder)",
+        type: "movie",
+        tmdbId: 1891,
+        mustInclude: ["Empire Strikes Back"],
+        mustNotInclude: ["A New Hope", "Return of the Jedi"]
+    },
+    {
+        name: "Return of the Jedi (1983, Episode VI folder)",
+        type: "movie",
+        tmdbId: 1892,
+        mustInclude: ["Return of the Jedi"],
+        mustNotInclude: ["A New Hope", "Empire Strikes Back"]
+    },
+    {
+        name: "Star Wars: The Force Awakens (2015, Episode VII folder)",
+        type: "movie",
+        tmdbId: 140607,
+        mustInclude: ["Force Awakens"],
+        mustNotInclude: ["Last Jedi", "Rise of Skywalker", "Revenge of the Sith"]
     }
 ];
 

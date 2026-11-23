@@ -547,6 +547,30 @@ function matchesMovieTitle(itemHref, targetTitle, targetYear) {
     return true;
 }
 
+// Episodic franchise folders/files, e.g. "<Franchise>-Episode IV - <Subtitle> (Year)" or "<Franchise> Episode IV (Year)".
+// TMDB may name such a film by its subtitle, by franchise + subtitle, or by the franchise alone, which the strict
+// word-set check in matchesMovieTitle rejects (extra "episode iv ..." words, differing sequel tokens).
+// Movie-only; the caller still applies the +/-1 year check.
+function matchesEpisodicMovieFolder(itemHref, targetTitle, allowFranchiseOnly) {
+    const folderTitle = extractFolderTitle(itemHref);
+    const m = folderTitle.match(/^(.+?) episode (?:\d{1,2}|[ivx]{1,4})(?: (.+))?$/);
+    if (!m) return false;
+    const franchise = m[1];
+    const subtitle = m[2] || "";
+    const target = cleanTitle(targetTitle).toLowerCase();
+    if (!target) return false;
+    const same = (a, b) => a === b || stripArticles(a) === stripArticles(b);
+
+    // "<Subtitle>" -> "<franchise> episode v <subtitle>"
+    if (subtitle && same(target, subtitle)) return true;
+    // "<Franchise>: <Subtitle>" -> "<franchise> episode vii <subtitle>"
+    if (subtitle && same(target, `${franchise} ${subtitle}`)) return true;
+    // "<Franchise>" -> "<franchise> episode iv <subtitle>"; only for the primary TMDB title, since subtitle
+    // splitting adds the bare franchise name as an alias to every film in the series.
+    if (allowFranchiseOnly && same(target, franchise)) return true;
+    return false;
+}
+
 function matchesMovieYear(lowerPath, year) {
     if (!year) return true;
     const y = parseInt(year, 10);
@@ -1183,6 +1207,8 @@ async function searchMovies(server, query, targetTitle, year, isAnimation) {
     const seenHrefs = new Set();
     const foldersToInspect = [];
     const titleList = Array.isArray(targetTitle) ? targetTitle : [targetTitle];
+    // titleList[0] is the primary TMDB title (candidateTitles starts with meta.title for movies)
+    const titleMatches = href => titleList.some((t, i) => matchesMovieTitle(href, t) || matchesEpisodicMovieFolder(href, t, i === 0));
 
     for (const item of matches) {
         const decoded = safeDecodeURIComponent(item.href);
@@ -1194,12 +1220,12 @@ async function searchMovies(server, query, targetTitle, year, isAnimation) {
         if (isAnimation === false && (lowerPath.includes("animation movies") || lowerPath.includes("/anime/"))) continue;
 
         if (isVideo) {
-            if (titleList.some(t => matchesMovieTitle(item.href, t)) && matchesMovieYear(lowerPath, year)) {
+            if (titleMatches(item.href) && matchesMovieYear(lowerPath, year)) {
                 seenHrefs.add(item.href);
                 streams.push(makeStream(item, server.url));
             }
         } else if (item.href.endsWith("/")) {
-            if (titleList.some(t => matchesMovieTitle(item.href, t)) && matchesMovieYear(lowerPath, year)) {
+            if (titleMatches(item.href) && matchesMovieYear(lowerPath, year)) {
                 foldersToInspect.push(item.href);
             }
         }
@@ -1418,6 +1444,7 @@ if (typeof module !== "undefined" && module.exports) {
         extractTvFolderInfo,
         matchesTvFolder,
         matchesMovieTitle,
+        matchesEpisodicMovieFolder,
         passesEpisodeFilter,
         cleanTitle,
         extractSequelTokens,
